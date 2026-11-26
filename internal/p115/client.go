@@ -698,8 +698,14 @@ func (c *Client) StartExtract(ctx context.Context, pickcode, outputCID string) (
 	marker := ""
 	entryCount := 0
 	for range 100 {
-		q := url.Values{"pick_code": {pickcode}, "file_name": {""}, "next_marker": {marker}}
-		listResp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_list?"+q.Encode(), nil, false)
+		q := url.Values{
+			"pick_code":   {pickcode},
+			"file_name":   {""},
+			"paths":       {"文件"},
+			"next_marker": {marker},
+			"page_count":  {"999"},
+		}
+		listResp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_info?"+q.Encode(), nil, false)
 		if err != nil {
 			return "", err
 		}
@@ -765,7 +771,8 @@ func (c *Client) ExtractStatus(ctx context.Context, remoteID string) (string, er
 	if asInt64(data["extract_status"]) == -1 {
 		return "failed", nil
 	}
-	if firstString(data, "percent", "progress") == "100" {
+	pct := strings.TrimSuffix(strings.TrimSpace(firstString(data, "percent", "progress")), "%")
+	if pct == "100" || asInt64(data["percent"]) >= 100 || asInt64(data["progress"]) >= 100 {
 		return "success", nil
 	}
 	return "running", nil
@@ -779,8 +786,14 @@ func (c *Client) ArchiveManifest(ctx context.Context, pickcode string) ([]Archiv
 		queue = queue[1:]
 		marker := ""
 		for range 100 {
-			q := url.Values{"pick_code": {pickcode}, "file_name": {cur}, "next_marker": {marker}}
-			resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_list?"+q.Encode(), nil, false)
+			q := url.Values{
+				"pick_code":   {pickcode},
+				"file_name":   {cur},
+				"paths":       {"文件"},
+				"next_marker": {marker},
+				"page_count":  {"999"},
+			}
+			resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_info?"+q.Encode(), nil, false)
 			if err != nil {
 				return nil, err
 			}

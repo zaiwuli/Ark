@@ -170,7 +170,11 @@ func TestStartExtractUsesExtractListAndAddExtractFile(t *testing.T) {
 	var gotPaths, gotToPID string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/files/extract_list":
+		case "/files/extract_info":
+			if r.URL.Query().Get("paths") != "文件" || r.URL.Query().Get("page_count") != "999" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			_, _ = w.Write([]byte(`{"state":true,"data":{"list":[{"file_name":"a.mp4","file_category":1},{"file_name":"sub","file_category":0}]}}`))
 		case "/files/add_extract_file":
 			if r.Method == http.MethodPost {
