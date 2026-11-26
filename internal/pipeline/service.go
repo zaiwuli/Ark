@@ -67,6 +67,7 @@ type Service struct {
 	cloud         p115.Port
 	portPinned    bool
 	p115Cfg       P115Settings
+	paused        bool
 	dateCache     map[string]string // "root:YYYY-MM-DD" -> cid
 	lastLifeRun   int64
 	lastLifeSeen  int64
@@ -109,7 +110,32 @@ func NewServiceWithOptions(st *store.Store, opt ServiceOptions) *Service {
 		dateCache:        make(map[string]string),
 	}
 	_ = svc.ReloadP115(context.Background())
+	var paused bool
+	if ok, _ := st.GetSetting(context.Background(), "scheduler.paused", &paused); ok {
+		svc.paused = paused
+	}
 	return svc
+}
+
+func (s *Service) IsPaused() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.paused
+}
+
+func (s *Service) SetPaused(ctx context.Context, paused bool) error {
+	if err := s.store.SetSetting(ctx, "scheduler.paused", paused, false); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.paused = paused
+	s.mu.Unlock()
+	msg := "后台任务调度已恢复"
+	if paused {
+		msg = "后台任务调度已暂停（不会自动启动新任务）"
+	}
+	_ = s.store.RecordEvent(ctx, "system", "SCHEDULER_TOGGLED", "cloud_monitor", msg, false)
+	return nil
 }
 
 // SetPort injects a custom p115.Port (primarily for tests).
@@ -363,6 +389,10 @@ func (s *Service) Tick(ctx context.Context) error {
 			_ = s.notifier.Flush(ctx)
 		}
 	}()
+
+	if s.IsPaused() {
+		return nil
+	}
 
 	// 1. Local/NAS directory watch & local extractions run even without 115 configured.
 	if s.localWatcher != nil {

@@ -291,11 +291,36 @@ func TestMaintenanceClearAndCacheReclaim(t *testing.T) {
 		t.Fatalf("cloud_archive single retry unexpected: %d %s", recRetry.Code, recRetry.Body.String())
 	}
 
-	// Active cloud_prepare pipeline cannot be deleted.
+	// Cancel pauses an active task, and retry resumes it cleanly.
+	recCancel := httptest.NewRecorder()
+	h.ServeHTTP(recCancel, httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/p_cfail/cancel", nil))
+	if recCancel.Code != http.StatusOK || !bytes.Contains(recCancel.Body.Bytes(), []byte(`"state":"cancelled"`)) {
+		t.Fatalf("cancel unexpected: %d %s", recCancel.Code, recCancel.Body.String())
+	}
+
+	// Actively running cloud_inspect returns 409 without force, and succeeds with force=1.
+	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_insp','cloud_archive','id_insp','insp.rar','cloud_inspect','cloud_inspect',1,1)`)
 	recDel := httptest.NewRecorder()
-	h.ServeHTTP(recDel, httptest.NewRequest(http.MethodDelete, "/api/v1/pipelines/p_cfail", nil))
+	h.ServeHTTP(recDel, httptest.NewRequest(http.MethodDelete, "/api/v1/pipelines/p_insp", nil))
 	if recDel.Code != http.StatusConflict {
-		t.Fatalf("active cloud_prepare delete expected 409, got %d", recDel.Code)
+		t.Fatalf("active cloud_inspect delete expected 409, got %d", recDel.Code)
+	}
+	recForceDel := httptest.NewRecorder()
+	h.ServeHTTP(recForceDel, httptest.NewRequest(http.MethodDelete, "/api/v1/pipelines/p_insp?force=1", nil))
+	if recForceDel.Code != http.StatusOK {
+		t.Fatalf("force delete expected 200, got %d: %s", recForceDel.Code, recForceDel.Body.String())
+	}
+
+	// Scheduler pause/resume round-trip.
+	recPause := httptest.NewRecorder()
+	h.ServeHTTP(recPause, httptest.NewRequest(http.MethodPost, "/api/v1/scheduler/pause", nil))
+	if recPause.Code != http.StatusOK || !bytes.Contains(recPause.Body.Bytes(), []byte(`"scheduler_paused":true`)) {
+		t.Fatalf("scheduler pause unexpected: %d %s", recPause.Code, recPause.Body.String())
+	}
+	recResume := httptest.NewRecorder()
+	h.ServeHTTP(recResume, httptest.NewRequest(http.MethodPost, "/api/v1/scheduler/resume", nil))
+	if recResume.Code != http.StatusOK || !bytes.Contains(recResume.Body.Bytes(), []byte(`"scheduler_paused":false`)) {
+		t.Fatalf("scheduler resume unexpected: %d %s", recResume.Code, recResume.Body.String())
 	}
 
 	// Archive rule & organizer endpoints round-trip.
@@ -318,10 +343,10 @@ func TestMaintenanceClearAndCacheReclaim(t *testing.T) {
 		t.Fatalf("reclaim-cache unexpected: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Clear terminal pipelines deletes p_done but preserves active p_run.
+	// Clear terminal pipelines deletes p_done and cancelled p_cfail, while preserving active p_run.
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/clear", bytes.NewBufferString(`{"scope":"terminal"}`)))
-	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"deleted":1`)) {
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"deleted":2`)) {
 		t.Fatalf("clear pipelines unexpected: %d %s", rec.Code, rec.Body.String())
 	}
 	if _, err := st.GetPipeline(t.Context(), "p_run"); err != nil {

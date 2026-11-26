@@ -30,16 +30,20 @@ func (s *Store) MaintenanceStats(ctx context.Context, dbPath string) (Maintenanc
 	return st, nil
 }
 
-// ClearPipelines deletes terminal pipeline records (never active, queued, or uncertain ones) without touching real files.
+// ClearPipelines deletes pipeline records by scope without ever touching real files.
 func (s *Store) ClearPipelines(ctx context.Context, scope string) (int64, error) {
 	var query string
 	switch scope {
 	case "completed":
 		query = `DELETE FROM pipelines WHERE state = 'completed'`
 	case "failed":
-		query = `DELETE FROM pipelines WHERE state IN ('failed', 'submit_failed', 'seed_cleanup_failed')`
+		query = `DELETE FROM pipelines WHERE state IN ('failed', 'submit_failed', 'seed_cleanup_failed', 'cancelled')`
 	case "terminal", "":
-		query = `DELETE FROM pipelines WHERE state IN ('completed', 'failed', 'submit_failed', 'seed_cleanup_failed')`
+		query = `DELETE FROM pipelines WHERE state IN ('completed', 'failed', 'submit_failed', 'seed_cleanup_failed', 'cancelled')`
+	case "queued":
+		query = `DELETE FROM pipelines WHERE state IN ('queued', 'cloud_prepare', 'wait_local_confirm', 'cancelled')`
+	case "all":
+		query = `DELETE FROM pipelines`
 	default:
 		return 0, ErrInvalid
 	}

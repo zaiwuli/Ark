@@ -107,8 +107,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/pipelines", s.requireRole("readonly", s.handleListPipelines))
 	s.mux.HandleFunc("POST /api/v1/pipelines/clear", s.requireRole("admin", s.handleClearPipelines))
 	s.mux.HandleFunc("POST /api/v1/pipelines/retry-failed", s.requireRole("admin", s.handleRetryFailedPipelines))
+	s.mux.HandleFunc("POST /api/v1/scheduler/pause", s.requireRole("admin", s.handleSchedulerPause))
+	s.mux.HandleFunc("POST /api/v1/scheduler/resume", s.requireRole("admin", s.handleSchedulerResume))
 	s.mux.HandleFunc("GET /api/v1/pipelines/{id}", s.requireRole("readonly", s.handleGetPipeline))
 	s.mux.HandleFunc("POST /api/v1/pipelines/{id}/retry", s.requireRole("admin", s.handleRetryPipeline))
+	s.mux.HandleFunc("POST /api/v1/pipelines/{id}/cancel", s.requireRole("admin", s.handleCancelPipeline))
 	s.mux.HandleFunc("POST /api/v1/pipelines/{id}/confirm-local", s.requireRole("admin", s.handleConfirmLocalFallback))
 	s.mux.HandleFunc("DELETE /api/v1/pipelines/{id}", s.requireRole("admin", s.handleDeletePipeline))
 	s.mux.HandleFunc("GET /api/v1/events", s.requireRole("readonly", s.handleListEvents))
@@ -224,9 +227,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":        config.Version,
 		"commit":         config.Commit,
 		"build_time":     config.BuildTime,
-		"go_version":     runtime.Version(),
-		"uptime_seconds": s.metrics.UptimeSeconds(),
-		"database_ready": dbReady,
+		"go_version":       runtime.Version(),
+		"uptime_seconds":   s.metrics.UptimeSeconds(),
+		"database_ready":   dbReady,
+		"scheduler_paused": s.pipeline.IsPaused(),
 		"auth": map[string]any{
 			"role":          p.Role,
 			"authenticated": p.Authenticated,

@@ -397,7 +397,7 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 	if err != nil {
 		return Pipeline{}, err
 	}
-	if p.State != "failed" && p.State != "submit_failed" && p.State != "seed_cleanup_failed" {
+	if p.State != "failed" && p.State != "submit_failed" && p.State != "seed_cleanup_failed" && p.State != "cancelled" {
 		return Pipeline{}, ErrPipelineBusy
 	}
 	now := time.Now().Unix()
@@ -416,6 +416,7 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 		p.Stage = "offline_submit"
 	}
 	p.Attempts = 0
+	p.CancelRequested = false
 	p.ErrorCode = ""
 	p.ErrorMessage = ""
 	p.WaitReason = ""
@@ -424,19 +425,43 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 	if err := s.UpdatePipeline(ctx, p); err != nil {
 		return Pipeline{}, err
 	}
-	_ = s.RecordEvent(ctx, p.ID, "RETRIED", p.Stage, "用户触发重试", false)
+	_ = s.RecordEvent(ctx, p.ID, "RETRIED", p.Stage, "用户恢复/重试任务", false)
 	return p, nil
 }
 
-func (s *Store) DeletePipeline(ctx context.Context, id string) error {
+// CancelPipeline pauses/cancels any non-completed pipeline so the scheduler stops processing it.
+func (s *Store) CancelPipeline(ctx context.Context, id string) (Pipeline, error) {
+	p, err := s.GetPipeline(ctx, id)
+	if err != nil {
+		return Pipeline{}, err
+	}
+	if p.State == "completed" {
+		return Pipeline{}, ErrPipelineBusy
+	}
+	p.State = "cancelled"
+	p.Stage = "cancelled"
+	p.CancelRequested = true
+	p.NextRunAt = 0
+	if err := s.UpdatePipeline(ctx, p); err != nil {
+		return Pipeline{}, err
+	}
+	_ = s.RecordEvent(ctx, p.ID, "CANCELLED", "cancelled", "用户已暂停/取消该任务", false)
+	return p, nil
+}
+
+// DeletePipeline removes a pipeline record without touching real files.
+// Waiting/paused/ended pipelines delete directly; actively executing ones require force=true.
+func (s *Store) DeletePipeline(ctx context.Context, id string, force bool) error {
 	p, err := s.GetPipeline(ctx, id)
 	if err != nil {
 		return err
 	}
-	switch p.State {
-	case "submitting", "submission_unknown", "running", "extracting", "caching", "reconciling",
-		"local_extract", "cloud_prepare", "cloud_inspect", "cloud_export", "cloud_progress", "seed_cleanup":
-		return ErrPipelineBusy
+	if !force {
+		switch p.State {
+		case "submitting", "submission_unknown", "running", "extracting", "caching", "reconciling",
+			"local_extract", "cloud_inspect", "cloud_export", "cloud_progress", "seed_cleanup":
+			return ErrPipelineBusy
+		}
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM pipelines WHERE id = ?`, id)
 	return err

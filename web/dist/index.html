@@ -140,8 +140,10 @@
                 </select>
               </div>
               <div class="toolbar">
+                <button type="button" id="sched-pause-btn" class="btn btn-secondary btn-sm" onclick="toggleScheduler(this)">暂停调度</button>
                 <button type="button" class="btn btn-secondary btn-sm" onclick="retryAllFailed(this)">重试失败项</button>
-                <button type="button" class="btn btn-danger btn-sm" onclick="clearPipelines('terminal', this)">清空已结束</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="clearPipelines('terminal', this)">清空已结束</button>
+                <button type="button" class="btn btn-danger btn-sm" onclick="clearPipelines('all', this)">清空全部</button>
                 <select id="page-size" aria-label="每页数量" style="width:auto;height:30px;padding:0 8px;font-size:12px;" onchange="onPageSizeChange()">
                   <option value="20" selected>20 条/页</option>
                   <option value="50">50 条/页</option>

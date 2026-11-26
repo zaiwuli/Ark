@@ -172,14 +172,33 @@ func (s *Server) handleRetryPipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
-func (s *Server) handleDeletePipeline(w http.ResponseWriter, r *http.Request) {
-	err := s.store.DeletePipeline(r.Context(), r.PathValue("id"))
+func (s *Server) handleCancelPipeline(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.CancelPipeline(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "PIPELINE_NOT_FOUND", "pipeline not found")
 		return
 	}
 	if errors.Is(err, store.ErrPipelineBusy) {
-		writeError(w, http.StatusConflict, "PIPELINE_BUSY", "cannot delete active or uncertain pipeline")
+		writeError(w, http.StatusConflict, "PIPELINE_NOT_CANCELLABLE", "completed pipeline cannot be cancelled")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to cancel pipeline")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"item": item})
+}
+
+func (s *Server) handleDeletePipeline(w http.ResponseWriter, r *http.Request) {
+	qForce := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("force")))
+	force := qForce == "1" || qForce == "true"
+	err := s.store.DeletePipeline(r.Context(), r.PathValue("id"), force)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "PIPELINE_NOT_FOUND", "pipeline not found")
+		return
+	}
+	if errors.Is(err, store.ErrPipelineBusy) {
+		writeError(w, http.StatusConflict, "PIPELINE_BUSY", "cannot delete active pipeline without force=true")
 		return
 	}
 	if err != nil {
@@ -187,6 +206,22 @@ func (s *Server) handleDeletePipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) handleSchedulerPause(w http.ResponseWriter, r *http.Request) {
+	if err := s.pipeline.SetPaused(r.Context(), true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scheduler_paused": true})
+}
+
+func (s *Server) handleSchedulerResume(w http.ResponseWriter, r *http.Request) {
+	if err := s.pipeline.SetPaused(r.Context(), false); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scheduler_paused": false})
 }
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {

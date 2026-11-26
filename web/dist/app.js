@@ -8,6 +8,7 @@ const state = {
   pipelines: [],
   sourcesMap: {},
   polling: true,
+  schedulerPaused: false,
   selectedFile: null,
   timer: null,
 };
@@ -34,6 +35,7 @@ const STAGE_ZH = {
   cache: '直链缓存原包',
   local_extract: '本地 7-Zip 解压',
   complete: '处理完成',
+  cancelled: '已暂停',
   cloud_monitor: '云端监测',
   bark: 'Bark 联动触发',
   organize: '目录整理',
@@ -71,7 +73,9 @@ const EVENT_KIND_ZH = {
   BARK_PATH_FAILED: 'Bark 路径解析失败',
   CACHE_RECLAIMED: '缓存回收',
   DATE_ORGANIZED: '日期目录整理',
-  RETRIED: '重新入队',
+  RETRIED: '恢复 / 重试',
+  CANCELLED: '已暂停任务',
+  SCHEDULER_TOGGLED: '调度开关',
   SUCCEEDED: '处理成功',
   FAILED: '处理失败',
 };
@@ -282,7 +286,11 @@ async function refreshTelemetry(force = false) {
     document.getElementById('kpi-7z-sub').textContent = ex.available ? '按需启动 · 空闲 0 MB' : '容器镜像默认内置 7-Zip 26.01';
     document.getElementById('kpi-up').textContent = fmtUptime(st.uptime_seconds);
     document.getElementById('kpi-up-sub').textContent = `数据库 ${st.database_ready ? '正常' : '异常'} · ${st.auth.no_auth_mode ? '内网免登录' : '令牌保护'}`;
-    document.getElementById('live-text').textContent = `同步于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+    state.schedulerPaused = !!st.scheduler_paused;
+    renderSchedulerBtn();
+    document.getElementById('live-text').textContent = state.schedulerPaused
+      ? '后台调度已暂停'
+      : `同步于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
   } catch {
     document.getElementById('live-text').textContent = '连接中断';
   }
@@ -292,7 +300,7 @@ async function refreshTelemetry(force = false) {
 function stateCategory(st) {
   if (st === 'completed') return 'completed';
   if (st.includes('fail')) return 'failed';
-  if (st === 'wait_local_confirm' || st === 'submission_unknown') return 'attention';
+  if (st === 'wait_local_confirm' || st === 'submission_unknown' || st === 'cancelled') return 'attention';
   return 'active';
 }
 
@@ -342,6 +350,7 @@ function stateInfo(st) {
     caching: ['缓存中', 'badge-info', 3],
     local_extract: ['本地解压', 'badge-info', 4],
     completed: ['已完成', 'badge-ok', 4],
+    cancelled: ['已暂停', 'badge-warn', 1],
     failed: ['失败', 'badge-err', 4],
     submit_failed: ['提交失败', 'badge-err', 1],
     seed_cleanup_failed: ['清理失败', 'badge-err', 3],
@@ -475,7 +484,8 @@ function renderPipelines() {
         <td style="text-align:right;">
           <div class="row-ops">
             ${p.state === 'wait_local_confirm' ? `<button type="button" class="btn btn-warn btn-sm" onclick="confirmLocal('${p.id}')">转本地</button>` : ''}
-            ${p.state.includes('fail') ? `<button type="button" class="btn btn-secondary btn-sm" onclick="retryPipe('${p.id}')">重试</button>` : ''}
+            ${(p.state.includes('fail') || p.state === 'cancelled') ? `<button type="button" class="btn btn-secondary btn-sm" onclick="retryPipe('${p.id}')">${p.state === 'cancelled' ? '继续' : '重试'}</button>` : ''}
+            ${(p.state !== 'completed' && p.state !== 'cancelled' && !p.state.includes('fail')) ? `<button type="button" class="btn btn-secondary btn-sm" onclick="cancelPipe('${p.id}')">暂停</button>` : ''}
             <button type="button" class="icon-del" title="删除记录" aria-label="删除记录" onclick="deletePipe('${p.id}')">${trashSVG}</button>
           </div>
         </td>
@@ -499,10 +509,12 @@ function renderPipelines() {
           <span>· ${fmtTime(p.created_at)}</span>
           ${shortReason ? `<span class="${reasonCls}">· ${esc(shortReason)}</span>` : ''}
         </div>
-        ${(p.state === 'wait_local_confirm' || p.state.includes('fail')) ? `
+        ${(p.state !== 'completed') ? `
           <div class="m-row-actions">
             ${p.state === 'wait_local_confirm' ? `<button type="button" class="btn btn-warn btn-sm" onclick="confirmLocal('${p.id}')">转本地解压</button>` : ''}
-            ${p.state.includes('fail') ? `<button type="button" class="btn btn-secondary btn-sm" onclick="retryPipe('${p.id}')">重试</button>` : ''}
+            ${(p.state.includes('fail') || p.state === 'cancelled') ? `<button type="button" class="btn btn-secondary btn-sm" onclick="retryPipe('${p.id}')">${p.state === 'cancelled' ? '继续' : '重试'}</button>` : ''}
+            ${(p.state !== 'cancelled' && !p.state.includes('fail')) ? `<button type="button" class="btn btn-secondary btn-sm" onclick="cancelPipe('${p.id}')">暂停</button>` : ''}
+            <button type="button" class="btn btn-danger btn-sm" onclick="deletePipe('${p.id}')">删除</button>
           </div>` : ''}
       </div>`;
   }).join('');
@@ -555,7 +567,8 @@ async function openDetail(id) {
 
       <div class="toolbar">
         ${p.state === 'wait_local_confirm' ? `<button type="button" class="btn btn-warn btn-sm" onclick="confirmLocal('${p.id}');closeDetail();">确认下载到本地解压</button>` : ''}
-        ${p.state.includes('fail') ? `<button type="button" class="btn btn-primary btn-sm" onclick="retryPipe('${p.id}');closeDetail();">立即重试</button>` : ''}
+        ${(p.state.includes('fail') || p.state === 'cancelled') ? `<button type="button" class="btn btn-primary btn-sm" onclick="retryPipe('${p.id}');closeDetail();">${p.state === 'cancelled' ? '继续执行' : '立即重试'}</button>` : ''}
+        ${(p.state !== 'completed' && p.state !== 'cancelled' && !p.state.includes('fail')) ? `<button type="button" class="btn btn-secondary btn-sm" onclick="cancelPipe('${p.id}');closeDetail();">暂停任务</button>` : ''}
         <button type="button" class="btn btn-danger btn-sm" onclick="deletePipe('${p.id}');closeDetail();">删除任务记录</button>
       </div>
 
@@ -605,11 +618,41 @@ async function retryPipe(id) {
   else showAlert('tasks-alert', '当前状态不可重试');
   loadPipelines();
 }
-async function deletePipe(id) {
-  const r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (r.ok) showToast('已移除任务记录（不会删除真实文件）');
-  else showAlert('tasks-alert', '运行中或提交结果待核对的任务禁止删除');
+async function cancelPipe(id) {
+  const r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  if (r.ok) showToast('任务已暂停（可随时点“继续”恢复或直接删除）');
+  else showAlert('tasks-alert', '当前任务状态不可暂停');
   loadPipelines();
+}
+async function deletePipe(id) {
+  let r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (r.status === 409) {
+    if (!confirm('该任务正在执行中，是否强制移除 Ark 队列记录？（绝不会删除 115 云端或本地真实文件）')) return;
+    r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}?force=1`, { method: 'DELETE' });
+  }
+  if (r.ok) showToast('已移除任务记录（不会删除真实文件）');
+  else showAlert('tasks-alert', '删除任务记录失败');
+  loadPipelines();
+}
+function renderSchedulerBtn() {
+  const btn = document.getElementById('sched-pause-btn');
+  if (!btn) return;
+  btn.textContent = state.schedulerPaused ? '恢复调度' : '暂停调度';
+  btn.className = state.schedulerPaused ? 'btn btn-warn btn-sm' : 'btn btn-secondary btn-sm';
+}
+async function toggleScheduler(btn) {
+  btn.disabled = true;
+  try {
+    const endpoint = state.schedulerPaused ? '/api/v1/scheduler/resume' : '/api/v1/scheduler/pause';
+    const r = await fetch(endpoint, { method: 'POST' });
+    if (r.ok) {
+      const d = await r.json();
+      state.schedulerPaused = !!d.scheduler_paused;
+      renderSchedulerBtn();
+      showToast(state.schedulerPaused ? '已暂停后台任务调度' : '已恢复后台任务调度');
+      refreshTelemetry(true);
+    }
+  } finally { btn.disabled = false; }
 }
 async function triggerCloudScan(btn) {
   btn.disabled = true;
@@ -1219,7 +1262,9 @@ async function retryAllFailed(btn) {
 async function clearPipelines(scope, btn) {
   const tip = scope === 'completed'
     ? '确认清空所有「已完成」的任务记录？（仅清理记录，不删除真实文件）'
-    : '确认清空所有「已结束（完成+失败）」的任务记录？（进行中与待确认任务会保留，且不删除真实文件）';
+    : scope === 'all'
+      ? '确认清空「全部」任务记录（含排队中、待确认和已暂停任务）？（仅清空 Ark 队列记录，绝不删除 115 或本地真实文件）'
+      : '确认清空所有「已结束（完成+失败+已暂停）」的任务记录？（进行中任务会保留，且不删除真实文件）';
   if (!confirm(tip)) return;
   btn.disabled = true;
   try {
