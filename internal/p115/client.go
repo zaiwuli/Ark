@@ -24,8 +24,14 @@ type AdapterError struct {
 }
 
 func (e *AdapterError) Error() string {
+	if e.Step != "" && e.RemoteCode != "" {
+		return fmt.Sprintf("%s (%s, remote=%s)", e.Code, e.Step, e.RemoteCode)
+	}
 	if e.RemoteCode != "" {
 		return fmt.Sprintf("%s (remote=%s)", e.Code, e.RemoteCode)
+	}
+	if e.Step != "" {
+		return fmt.Sprintf("%s (%s)", e.Code, e.Step)
 	}
 	return e.Code
 }
@@ -230,8 +236,13 @@ func NewClient(cookie string, gov *Governor) (*Client, error) {
 }
 
 func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Values, mutation bool) (map[string]any, error) {
+	parsed, _, err := c.doJSONWithCookies(ctx, method, rawURL, form, mutation)
+	return parsed, err
+}
+
+func (c *Client) doJSONWithCookies(ctx context.Context, method, rawURL string, form url.Values, mutation bool) (map[string]any, []*http.Cookie, error) {
 	if err := c.gov.Before(time.Now()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	c.reqMu.Lock()
 	defer c.reqMu.Unlock()
@@ -241,7 +252,7 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -253,7 +264,7 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
 	if err != nil {
-		return nil, &AdapterError{Code: "REQUEST_BUILD_FAILED"}
+		return nil, nil, &AdapterError{Code: "REQUEST_BUILD_FAILED"}
 	}
 	req.Header.Set("Cookie", c.cookie)
 	req.Header.Set("User-Agent", c.userAgent)
@@ -265,41 +276,46 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+			return nil, nil, err
 		}
 		c.gov.Failure("REMOTE_UNAVAILABLE", time.Now())
 		// Never include raw HTTP error text which could embed signed URLs or tokens.
-		return nil, &AdapterError{Code: "REMOTE_UNAVAILABLE", Uncertain: mutation}
+		return nil, nil, &AdapterError{Code: "REMOTE_UNAVAILABLE", Uncertain: mutation}
 	}
 	defer resp.Body.Close()
+	respCookies := resp.Cookies()
 
 	limited := io.LimitReader(resp.Body, 4*1024*1024)
 	raw, err := io.ReadAll(limited)
 	if err != nil {
 		c.gov.Failure("REMOTE_UNAVAILABLE", time.Now())
-		return nil, &AdapterError{Code: "REMOTE_UNAVAILABLE", Uncertain: mutation}
+		return nil, nil, &AdapterError{Code: "REMOTE_UNAVAILABLE", Uncertain: mutation}
 	}
 
 	var parsed map[string]any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&parsed); err != nil {
-		return nil, &AdapterError{Code: "INVALID_REMOTE_RESPONSE", Uncertain: mutation}
+		return nil, nil, &AdapterError{Code: "INVALID_REMOTE_RESPONSE", Uncertain: mutation}
 	}
 	if isStateFalse(parsed["state"]) {
-		code := firstString(parsed, "errno", "errcode", "errNo")
+		code := firstString(parsed, "errno", "errcode", "errNo", "code")
+		msg := firstString(parsed, "message", "error", "msg")
+		if len(msg) > 120 {
+			msg = msg[:120]
+		}
 		switch code {
 		case "99", "401", "911", "990009":
 			c.gov.Failure("AUTH_OR_CHALLENGE_REQUIRED", time.Now())
-			return nil, &AdapterError{Code: "AUTH_OR_CHALLENGE_REQUIRED", RemoteCode: code}
+			return nil, nil, &AdapterError{Code: "AUTH_OR_CHALLENGE_REQUIRED", RemoteCode: code, Step: msg}
 		case "429", "10001":
 			c.gov.Failure("REMOTE_RATE_LIMIT", time.Now())
-			return nil, &AdapterError{Code: "REMOTE_RATE_LIMIT", RemoteCode: code}
+			return nil, nil, &AdapterError{Code: "REMOTE_RATE_LIMIT", RemoteCode: code, Step: msg}
 		default:
-			return nil, &AdapterError{Code: "REMOTE_REJECTED", RemoteCode: code}
+			return nil, nil, &AdapterError{Code: "REMOTE_REJECTED", RemoteCode: code, Step: msg}
 		}
 	}
-	return parsed, nil
+	return parsed, respCookies, nil
 }
 
 func isStateFalse(v any) bool {
@@ -673,8 +689,54 @@ func (c *Client) InspectExtract(ctx context.Context, pickcode string) (string, e
 }
 
 func (c *Client) StartExtract(ctx context.Context, pickcode, outputCID string) (string, error) {
-	form := url.Values{"pick_code": {pickcode}, "to_pid": {outputCID}, "extract_file": {""}, "paths": {""}}
-	resp, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/extract_file", form, true)
+	// 115 requires enumerating top-level entries via /files/extract_list before posting /files/add_extract_file.
+	form := url.Values{
+		"pick_code": {pickcode},
+		"paths":     {"文件"},
+		"to_pid":    {outputCID},
+	}
+	marker := ""
+	entryCount := 0
+	for range 100 {
+		q := url.Values{"pick_code": {pickcode}, "file_name": {""}, "next_marker": {marker}}
+		listResp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_list?"+q.Encode(), nil, false)
+		if err != nil {
+			return "", err
+		}
+		data, ok := listResp["data"].(map[string]any)
+		if !ok {
+			return "", &AdapterError{Code: "INVALID_ARCHIVE_MANIFEST"}
+		}
+		items, ok := data["list"].([]any)
+		if !ok {
+			return "", &AdapterError{Code: "INVALID_ARCHIVE_MANIFEST"}
+		}
+		for _, raw := range items {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name := firstString(m, "file_name")
+			if name == "" {
+				continue
+			}
+			if asInt64(m["file_category"]) == 0 {
+				form.Add("extract_dir[]", name)
+			} else {
+				form.Add("extract_file[]", name)
+			}
+			entryCount++
+		}
+		marker = firstString(data, "next_marker")
+		if marker == "" {
+			break
+		}
+	}
+	if entryCount == 0 {
+		return "", &AdapterError{Code: "EMPTY_ARCHIVE"}
+	}
+
+	resp, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/add_extract_file", form, true)
 	if err != nil {
 		return "", err
 	}
@@ -692,7 +754,7 @@ func (c *Client) StartExtract(ctx context.Context, pickcode, outputCID string) (
 
 func (c *Client) ExtractStatus(ctx context.Context, remoteID string) (string, error) {
 	q := url.Values{"extract_id": {remoteID}}
-	resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/extract_progress?"+q.Encode(), nil, false)
+	resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files/add_extract_file?"+q.Encode(), nil, false)
 	if err != nil {
 		return "", err
 	}
@@ -807,7 +869,7 @@ func (c *Client) DownloadURL(ctx context.Context, pickcode string) (DownloadInfo
 	payload, _ := json.Marshal(map[string]string{"pickcode": pickcode})
 	encoded := M115Encode(payload, key)
 	rawURL := fmt.Sprintf("%s/app/chrome/downurl?t=%d", c.proAPIBase, time.Now().Unix())
-	resp, err := c.doJSON(ctx, http.MethodPost, rawURL, url.Values{"data": {encoded}}, false)
+	resp, respCookies, err := c.doJSONWithCookies(ctx, http.MethodPost, rawURL, url.Values{"data": {encoded}}, false)
 	if err != nil {
 		return DownloadInfo{}, err
 	}
@@ -823,6 +885,16 @@ func (c *Client) DownloadURL(ctx context.Context, pickcode string) (DownloadInfo
 	if err := json.Unmarshal(plain, &decoded); err != nil {
 		return DownloadInfo{}, &AdapterError{Code: "DOWNLOAD_CAPABILITY_UNAVAILABLE"}
 	}
+	mergedCookie := c.cookie
+	if len(respCookies) > 0 {
+		parts := []string{strings.TrimRight(strings.TrimSpace(c.cookie), ";")}
+		for _, ck := range respCookies {
+			if ck != nil && ck.Name != "" {
+				parts = append(parts, ck.Name+"="+ck.Value)
+			}
+		}
+		mergedCookie = strings.Join(parts, "; ")
+	}
 	for _, val := range decoded {
 		if m, ok := val.(map[string]any); ok {
 			if urlObj, ok := m["url"].(map[string]any); ok {
@@ -831,7 +903,7 @@ func (c *Client) DownloadURL(ctx context.Context, pickcode string) (DownloadInfo
 						URL: u,
 						Headers: map[string]string{
 							"User-Agent": c.userAgent,
-							"Cookie":     c.cookie,
+							"Cookie":     mergedCookie,
 						},
 						SHA1: strings.ToLower(firstString(m, "sha1")),
 					}, nil

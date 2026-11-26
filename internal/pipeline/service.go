@@ -389,9 +389,6 @@ func (s *Service) Tick(ctx context.Context) error {
 				return err
 			}
 		}
-		if time.Now().Unix()-s.lastCloudScan >= 300 {
-			_, _ = s.ScanCloudSources(ctx, nil)
-		}
 		if err := s.stepCloudArchives(ctx, cloud, cfg); err != nil {
 			return err
 		}

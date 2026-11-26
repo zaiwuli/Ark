@@ -350,6 +350,24 @@ func (s *Store) ListDuePipelines(ctx context.Context, kind string, states []stri
 	return list, rows.Err()
 }
 
+// CountPipelinesInStates counts pipelines of a given kind currently in any of the specified states.
+func (s *Store) CountPipelinesInStates(ctx context.Context, kind string, states []string) (int, error) {
+	if len(states) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(states))
+	args := make([]any, 0, len(states)+1)
+	args = append(args, kind)
+	for i, st := range states {
+		placeholders[i] = "?"
+		args = append(args, st)
+	}
+	q := fmt.Sprintf(`SELECT COUNT(1) FROM pipelines WHERE kind = ? AND state IN (%s)`, strings.Join(placeholders, ","))
+	var n int
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&n)
+	return n, err
+}
+
 func (s *Store) UpdatePipeline(ctx context.Context, p Pipeline) error {
 	p.UpdatedAt = time.Now().Unix()
 	autoInt := 0

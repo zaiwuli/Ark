@@ -164,3 +164,57 @@ func TestClientNatsortFallbackOn20130827(t *testing.T) {
 		t.Fatalf("expected natsort fallback success, hit=%v page=%+v err=%v", natsortHit, page, err)
 	}
 }
+
+func TestStartExtractUsesExtractListAndAddExtractFile(t *testing.T) {
+	var gotFiles, gotDirs []string
+	var gotPaths, gotToPID string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/extract_list":
+			_, _ = w.Write([]byte(`{"state":true,"data":{"list":[{"file_name":"a.mp4","file_category":1},{"file_name":"sub","file_category":0}]}}`))
+		case "/files/add_extract_file":
+			if r.Method == http.MethodPost {
+				_ = r.ParseForm()
+				gotFiles = r.PostForm["extract_file[]"]
+				gotDirs = r.PostForm["extract_dir[]"]
+				gotPaths = r.PostForm.Get("paths")
+				gotToPID = r.PostForm.Get("to_pid")
+				_, _ = w.Write([]byte(`{"state":true,"data":{"extract_id":"ext_999"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"state":true,"data":{"extract_status":1,"percent":100}}`))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	c, err := NewClient("UID=12345_A1_1", NewGovernor(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.webAPIBase = ts.URL
+	c.minInterval = 0
+
+	extID, err := c.StartExtract(t.Context(), "pc_demo", "out_cid_1")
+	if err != nil || extID != "ext_999" {
+		t.Fatalf("StartExtract unexpected: id=%s err=%v", extID, err)
+	}
+	if gotPaths != "文件" || gotToPID != "out_cid_1" || len(gotFiles) != 1 || gotFiles[0] != "a.mp4" || len(gotDirs) != 1 || gotDirs[0] != "sub" {
+		t.Fatalf("unexpected add_extract_file form: paths=%q to_pid=%q files=%v dirs=%v", gotPaths, gotToPID, gotFiles, gotDirs)
+	}
+	st, err := c.ExtractStatus(t.Context(), extID)
+	if err != nil || st != "success" {
+		t.Fatalf("ExtractStatus unexpected: st=%s err=%v", st, err)
+	}
+
+	// Verify M115Encode produces valid 128-byte RSA PKCS#1 v1.5 block(s) base64-encoded.
+	key, err := GenerateM115Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := M115Encode([]byte(`{"pickcode":"pc_demo"}`), key)
+	if len(enc) < 160 {
+		t.Fatalf("unexpected M115Encode output length: %d", len(enc))
+	}
+}

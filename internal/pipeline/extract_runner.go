@@ -421,13 +421,35 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 	return nil
 }
 
-// stepCloudArchives advances cloud_archive pipelines through prepare -> inspect -> export -> progress -> caching.
+// stepCloudArchives advances cloud_archive pipelines strictly serially for 115 cloud extraction
+// (115 server rejects concurrent push_extract / add_extract_file tasks), while allowing local caching independently.
 func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P115Settings) error {
 	now := time.Now().Unix()
-	due, err := s.store.ListDuePipelines(ctx, "cloud_archive",
-		[]string{"cloud_prepare", "cloud_inspect", "cloud_export", "cloud_progress", "caching"}, now, 5)
-	if err != nil || len(due) == 0 {
+	var due []store.Pipeline
+
+	// 1. Always allow 1 due local-fallback caching download independently of 115 cloud-extract slot.
+	if cacheDue, err := s.store.ListDuePipelines(ctx, "cloud_archive", []string{"caching"}, now, 1); err == nil && len(cacheDue) > 0 {
+		due = append(due, cacheDue...)
+	}
+
+	// 2. Strictly serialize 115 cloud extract (1 in-flight task at a time: cloud_progress -> cloud_export -> cloud_inspect -> cloud_prepare).
+	inFlight, err := s.store.ListDuePipelines(ctx, "cloud_archive", []string{"cloud_progress", "cloud_export", "cloud_inspect"}, now, 1)
+	if err != nil {
 		return err
+	}
+	if len(inFlight) > 0 {
+		due = append(due, inFlight...)
+	} else {
+		// Only start a new cloud_prepare if zero other tasks are currently in-flight on 115 cloud extract.
+		activeCount, cErr := s.store.CountPipelinesInStates(ctx, "cloud_archive", []string{"cloud_progress", "cloud_export", "cloud_inspect"})
+		if cErr == nil && activeCount == 0 {
+			if prepDue, pErr := s.store.ListDuePipelines(ctx, "cloud_archive", []string{"cloud_prepare"}, now, 1); pErr == nil && len(prepDue) > 0 {
+				due = append(due, prepDue...)
+			}
+		}
+	}
+	if len(due) == 0 {
+		return nil
 	}
 	passwords := s.ArchivePasswords(ctx)
 	globalRule := s.ArchiveRule(ctx)
