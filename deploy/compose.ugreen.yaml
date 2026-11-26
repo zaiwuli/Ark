@@ -5,6 +5,10 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
+      # 如需按指定 NAS 用户权限写入文件，可取消注释并填写你的 PUID/PGID（绿联常见为 1000 / 10）
+      # PUID: "1000"
+      # PGID: "10"
+      # UMASK: "002"
       ARK_DATA_DIR: /config
       ARK_WORK_DIR: /data
       ARK_MEM_LIMIT_MB: "48"
@@ -13,7 +17,7 @@ services:
       # 若希望严格锁死 100m 容器硬上限，可将下方 mem_limit 改为 100m 并取消注释下一行：
       # ARK_EXTRACT_MAX_DICT_MB: "48"
     volumes:
-      # 请按绿联 NAS 实际共享文件夹路径修改左侧目录，并确保 UID 1000 可写
+      # 请按绿联 NAS 实际共享文件夹路径修改左侧目录
       - /volume1/docker/ark:/config
       - /volume1/downloads/ark:/data
     ports:

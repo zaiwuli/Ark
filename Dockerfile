@@ -18,23 +18,26 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM alpine:3.21 AS runtime
 ARG TARGETARCH=amd64
 
-RUN apk add --no-cache ca-certificates tzdata xz wget \
-    && addgroup -g 1000 ark \
-    && adduser -D -u 1000 -G ark ark
+RUN apk add --no-cache ca-certificates tzdata su-exec xz wget
 
 COPY scripts/install_7zip.sh /tmp/install_7zip.sh
-RUN chmod +x /tmp/install_7zip.sh \
+RUN sed -i 's/\r$//' /tmp/install_7zip.sh \
+    && chmod +x /tmp/install_7zip.sh \
     && /tmp/install_7zip.sh "$TARGETARCH" \
     && rm -f /tmp/install_7zip.sh \
     && apk del xz wget
 
 WORKDIR /app
 COPY --from=builder /out/ark /usr/local/bin/ark
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
-RUN mkdir -p /config /data && chown -R 1000:1000 /config /data
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && mkdir -p /config /data
 
 ENV TZ=Asia/Shanghai \
+    UMASK=022 \
     ARK_LISTEN_ADDR=:5656 \
     ARK_DATA_DIR=/config \
     ARK_WORK_DIR=/data \
@@ -43,10 +46,9 @@ ENV TZ=Asia/Shanghai \
     GOMEMLIMIT=48MiB \
     GOGC=50
 
-USER 1000:1000
 EXPOSE 5656
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD ["/usr/local/bin/ark", "--healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/ark"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
