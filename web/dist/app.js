@@ -804,6 +804,7 @@ async function loadLogs() {
 /* Settings */
 async function loadP115() {
   const d = await fetch('/api/v1/settings/p115').then((r) => r.json());
+  document.getElementById('p115-by-date').checked = d.cloud_extract_by_date !== false;
   document.getElementById('p115-life').checked = !!d.life_monitor_enabled;
   document.getElementById('p115-root').value = d.cloud_root_cid || '';
   document.getElementById('p115-status').innerHTML = `
@@ -819,6 +820,7 @@ async function saveP115(btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         cookie: document.getElementById('p115-cookie').value.trim(),
+        cloud_extract_by_date: document.getElementById('p115-by-date').checked,
         life_monitor_enabled: document.getElementById('p115-life').checked,
       }),
     });

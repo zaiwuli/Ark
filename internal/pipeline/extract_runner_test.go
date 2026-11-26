@@ -77,9 +77,9 @@ func TestCloudExtractEndToEndWithMock(t *testing.T) {
 	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", OfflineRootCID: "off_root", CloudOutputCID: "out_root"})
 
 	// Create a cloud_archive pipeline directly and step through prepare -> export -> progress -> completed.
-	id, created, err := st.CreateCloudArchivePipeline(t.Context(), "", "", "cloud:f99:1024", "pack.rar", 1024,
+	id, created, err := st.CreateCloudArchivePipeline(t.Context(), "", "", "cloud:f99:1024", "pack.rar", "2026-11-26", 1024,
 		`{"fid":"f99","cid":"day1","pickcode":"pc99","name":"pack.rar","size":1024}`,
-		`{"output_cid":"out_root","squash_root":true}`)
+		`{"output_cid":"out_root","output_date_dir":true,"squash_root":true}`)
 	if err != nil || !created {
 		t.Fatalf("CreateCloudArchivePipeline: err=%v created=%v", err, created)
 	}
@@ -95,5 +95,8 @@ func TestCloudExtractEndToEndWithMock(t *testing.T) {
 	final, _ := st.GetPipeline(t.Context(), id)
 	if final.State != "completed" {
 		t.Fatalf("expected cloud_archive completed, got state=%s err=%s", final.State, final.ErrorMessage)
+	}
+	if mock.Folders["out_root/2026-11-26"] == "" || mock.Folders["cid_2026-11-26/pack"] == "" {
+		t.Fatalf("expected date-layered output folder out_root/2026-11-26/pack, got folders=%+v", mock.Folders)
 	}
 }

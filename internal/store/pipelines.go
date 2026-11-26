@@ -527,16 +527,16 @@ func (s *Store) CreateLocalArchivePipeline(ctx context.Context, in LocalArchiveI
 }
 
 // CreateCloudArchivePipeline inserts a cloud_archive pipeline linked to a parent offline task or cloud source.
-func (s *Store) CreateCloudArchivePipeline(ctx context.Context, parentID, sourceID, identity, name string, size int64, locatorJSON, policyJSON string) (string, bool, error) {
+func (s *Store) CreateCloudArchivePipeline(ctx context.Context, parentID, sourceID, identity, name, targetDate string, size int64, locatorJSON, policyJSON string) (string, bool, error) {
 	now := time.Now().Unix()
 	id := NewID("pl")
 	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO pipelines(
-			id, kind, identity, parent_id, source_id, name, size,
+			id, kind, identity, parent_id, source_id, name, size, target_date,
 			state, stage, auto_extract, next_run_at,
 			locator_json, policy_json, created_at, updated_at
-		) VALUES(?, 'cloud_archive', ?, ?, ?, ?, ?, 'cloud_prepare', 'cloud_prepare', 1, ?, ?, ?, ?, ?)
-	`, id, identity, parentID, sourceID, name, size, now, locatorJSON, policyJSON, now, now)
+		) VALUES(?, 'cloud_archive', ?, ?, ?, ?, ?, ?, 'cloud_prepare', 'cloud_prepare', 1, ?, ?, ?, ?, ?)
+	`, id, identity, parentID, sourceID, name, size, targetDate, now, locatorJSON, policyJSON, now, now)
 	if err != nil {
 		return "", false, err
 	}

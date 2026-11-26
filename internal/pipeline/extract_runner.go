@@ -122,10 +122,15 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 			polBytes, _ := json.Marshal(ArchiveRuleConfig{
 				SquashRoot:       true,
 				DisableRecursion: true,
+				OutputDateDir:    cfg.ExtractByDateEnabled(),
 				OutputCID:        cfg.CloudOutputCID,
 			})
+			targetDate := p.TargetDate
+			if targetDate == "" {
+				targetDate = time.Now().In(s.loc).Format("2006-01-02")
+			}
 			ident := fmt.Sprintf("cloud:%s:%d", f.FID, f.Size)
-			if _, created, err := s.store.CreateCloudArchivePipeline(ctx, p.ID, "", ident, f.Name, f.Size, string(locBytes), string(polBytes)); err == nil && created {
+			if _, created, err := s.store.CreateCloudArchivePipeline(ctx, p.ID, "", ident, f.Name, targetDate, f.Size, string(locBytes), string(polBytes)); err == nil && created {
 				adopted++
 			}
 		}
@@ -243,11 +248,24 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 			if outRoot == "" {
 				outRoot = loc.CID
 			}
+			parentCID := outRoot
+			if rule.OutputDateDir || cfg.ExtractByDateEnabled() {
+				targetDate := p.TargetDate
+				if targetDate == "" {
+					targetDate = time.Now().In(s.loc).Format("2006-01-02")
+				}
+				dateCID, err := s.resolveDateFolder(ctx, cloud, outRoot, targetDate)
+				if err != nil {
+					s.failCloudToFallback(ctx, p, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error())
+					continue
+				}
+				parentCID = dateCID
+			}
 			folderName := strings.TrimSuffix(loc.Name, filepath.Ext(loc.Name))
 			if folderName == "" {
 				folderName = p.ID
 			}
-			targetCID, err := cloud.EnsureFolder(ctx, outRoot, folderName)
+			targetCID, err := cloud.EnsureFolder(ctx, parentCID, folderName)
 			if err != nil {
 				s.failCloudToFallback(ctx, p, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error())
 				continue

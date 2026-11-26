@@ -36,7 +36,15 @@ type P115Settings struct {
 	CloudOutputCID     string `json:"cloud_output_cid"`
 	CloudArchiveCID    string `json:"cloud_archive_cid"`
 	CloudFailedCID     string `json:"cloud_failed_cid"`
+	CloudExtractByDate *bool  `json:"cloud_extract_by_date,omitempty"`
 	LifeMonitorEnabled bool   `json:"life_monitor_enabled"`
+}
+
+func (c P115Settings) ExtractByDateEnabled() bool {
+	if c.CloudExtractByDate == nil {
+		return true
+	}
+	return *c.CloudExtractByDate
 }
 
 type PipelinePolicy struct {
@@ -175,6 +183,14 @@ func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P1
 	}
 	if incoming.CloudFailedCID == "" {
 		incoming.CloudFailedCID = existing.CloudFailedCID
+	}
+	if incoming.CloudExtractByDate == nil {
+		if existing.CloudExtractByDate != nil {
+			incoming.CloudExtractByDate = existing.CloudExtractByDate
+		} else {
+			def := true
+			incoming.CloudExtractByDate = &def
+		}
 	}
 
 	if err := s.store.SetSetting(ctx, "p115.config", incoming, true); err != nil {

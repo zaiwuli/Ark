@@ -203,15 +203,16 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetP115(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.pipeline.P115Config()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":              cfg.Enabled,
-		"has_cookie":           cfg.Cookie != "",
-		"cloud_root_cid":       cfg.CloudRootCID,
-		"offline_root_cid":     cfg.OfflineRootCID,
-		"cloud_output_cid":     cfg.CloudOutputCID,
-		"cloud_archive_cid":    cfg.CloudArchiveCID,
-		"cloud_failed_cid":     cfg.CloudFailedCID,
-		"life_monitor_enabled": cfg.LifeMonitorEnabled,
-		"governor":             s.pipeline.GovernorStats(),
+		"enabled":               cfg.Enabled,
+		"has_cookie":            cfg.Cookie != "",
+		"cloud_root_cid":        cfg.CloudRootCID,
+		"offline_root_cid":      cfg.OfflineRootCID,
+		"cloud_output_cid":      cfg.CloudOutputCID,
+		"cloud_archive_cid":     cfg.CloudArchiveCID,
+		"cloud_failed_cid":      cfg.CloudFailedCID,
+		"cloud_extract_by_date": cfg.ExtractByDateEnabled(),
+		"life_monitor_enabled":  cfg.LifeMonitorEnabled,
+		"governor":              s.pipeline.GovernorStats(),
 	})
 }
 
@@ -227,15 +228,16 @@ func (s *Server) handlePutP115(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"saved":                true,
-		"enabled":              saved.Enabled,
-		"has_cookie":           saved.Cookie != "",
-		"cloud_root_cid":       saved.CloudRootCID,
-		"offline_root_cid":     saved.OfflineRootCID,
-		"cloud_output_cid":     saved.CloudOutputCID,
-		"cloud_archive_cid":    saved.CloudArchiveCID,
-		"cloud_failed_cid":     saved.CloudFailedCID,
-		"life_monitor_enabled": saved.LifeMonitorEnabled,
+		"saved":                 true,
+		"enabled":               saved.Enabled,
+		"has_cookie":            saved.Cookie != "",
+		"cloud_root_cid":        saved.CloudRootCID,
+		"offline_root_cid":      saved.OfflineRootCID,
+		"cloud_output_cid":      saved.CloudOutputCID,
+		"cloud_archive_cid":     saved.CloudArchiveCID,
+		"cloud_failed_cid":      saved.CloudFailedCID,
+		"cloud_extract_by_date": saved.ExtractByDateEnabled(),
+		"life_monitor_enabled":  saved.LifeMonitorEnabled,
 	})
 }
 
