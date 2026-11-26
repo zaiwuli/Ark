@@ -109,3 +109,28 @@ func TestOfflineTorrentToSeedCleanupEndToEnd(t *testing.T) {
 		t.Fatalf("expected completed with f_ad deleted; state=%s deleted=%v output=%s", final.State, mock.Deleted, final.OutputJSON)
 	}
 }
+
+func TestSaveP115ConfigPreservesEnabledOnEmptyCookieUpdate(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "ark.db"), filepath.Join(dir, "secret.key"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	svc := NewService(st, "Asia/Shanghai")
+	// 1. Save cookie initially -> enabled becomes true and client is created.
+	s1, err := svc.SaveP115Config(t.Context(), P115Settings{Cookie: "UID=123_A1_1; CID=abc; SEID=xyz"})
+	if err != nil || !s1.Enabled {
+		t.Fatalf("first save failed: %+v err=%v", s1, err)
+	}
+	// 2. Save again without re-pasting cookie (e.g. toggling life monitor or clicking Save again).
+	s2, err := svc.SaveP115Config(t.Context(), P115Settings{LifeMonitorEnabled: true})
+	if err != nil || !s2.Enabled || s2.Cookie == "" {
+		t.Fatalf("second save wiped enabled/cookie: %+v err=%v", s2, err)
+	}
+	cloud, _ := svc.snapshotCloud()
+	if cloud == nil {
+		t.Fatalf("expected active 115 client preserved after second save with empty cookie")
+	}
+}

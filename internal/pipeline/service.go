@@ -165,6 +165,9 @@ func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P1
 	incoming.Cookie = strings.TrimSpace(incoming.Cookie)
 	if incoming.Cookie == "" {
 		incoming.Cookie = existing.Cookie
+		if incoming.Cookie != "" {
+			incoming.Enabled = true
+		}
 	} else {
 		// Saving a cookie automatically enables connection.
 		incoming.Enabled = true

@@ -1,6 +1,7 @@
 package p115
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -254,6 +255,7 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	}
 	req.Header.Set("Cookie", c.cookie)
 	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Referer", "https://115.com/")
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -277,7 +279,9 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	}
 
 	var parsed map[string]any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&parsed); err != nil {
 		return nil, &AdapterError{Code: "INVALID_REMOTE_RESPONSE", Uncertain: mutation}
 	}
 	if state, ok := parsed["state"].(bool); ok && !state {
@@ -300,8 +304,6 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 	q := url.Values{
 		"aid":      {"1"},
 		"cid":      {cid},
-		"o":        {"user_ptime"},
-		"asc":      {"0"},
 		"offset":   {strconv.Itoa(offset)},
 		"show_dir": {"1"},
 		"limit":    {"115"},
@@ -852,6 +854,14 @@ func firstString(m map[string]any, keys ...string) string {
 
 func asInt64(v any) int64 {
 	switch t := v.(type) {
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n
+		}
+		if f, err := t.Float64(); err == nil {
+			return int64(f)
+		}
+		return 0
 	case float64:
 		return int64(t)
 	case int64:

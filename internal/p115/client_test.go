@@ -109,3 +109,27 @@ func TestOfflineSnapshotCacheAndBatchSubmit(t *testing.T) {
 		t.Fatalf("expected cached snapshot (listCalls=1), got %d err=%v", listCalls, err)
 	}
 }
+
+func TestClientLargeNumericCIDPrecision(t *testing.T) {
+	const bigCID = "2948172635481928374"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return 19-digit CID as an unquoted JSON number (exact 115 upstream behavior).
+		_, _ = w.Write([]byte(`{"state":true,"count":0,"path":[{"cid":0},{"cid":2948172635481928374}],"data":[]}`))
+	}))
+	defer ts.Close()
+
+	c, err := NewClient("UID=12345_A1_1", NewGovernor(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.webAPIBase = ts.URL
+	c.minInterval = 0
+
+	parts, err := c.DirectoryPath(t.Context(), bigCID)
+	if err != nil {
+		t.Fatalf("DirectoryPath failed on 19-digit numeric CID: %v", err)
+	}
+	if len(parts) != 2 || parts[1] != bigCID {
+		t.Fatalf("CID precision corrupted: got %v want [%s]", parts, bigCID)
+	}
+}

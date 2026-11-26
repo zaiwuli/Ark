@@ -81,6 +81,12 @@ const ERROR_CODE_ZH = {
   REMOTE_RATE_LIMIT: '触发 115 频率限制，已自动退避保护',
   REMOTE_CIRCUIT_OPEN: '115 触发风控熔断，已暂停请求等待恢复',
   AUTH_OR_CHALLENGE_REQUIRED: '115 登录已失效或需要人工验证，请更新 Cookie',
+  CID_NOT_VERIFIED: '云根目录编号（CID）不存在或无权访问，请核对 115 目录链接中的 cid 数字（根目录填 0）',
+  INVALID_REMOTE_RESPONSE: '115 返回了非预期响应（常见原因：Cookie 格式不完整、登录已失效或触发风控验证）',
+  INVALID_FILE_LIST: '读取 115 目录文件列表失败，请检查 Cookie 是否有效',
+  AMBIGUOUS_FOLDER: '目标目录下存在多个同名文件夹，为防冲突已停止，请先清理重名目录',
+  FOLDER_CREATE_UNKNOWN: '创建 115 文件夹结果未返回目录编号，请稍后重试',
+  REQUEST_BUILD_FAILED: '构造 115 请求失败，请检查 Cookie 中是否包含换行符等非法字符',
   PARTIAL_SUBMISSION_REQUIRES_RECONCILIATION: '批量提交部分超时，正在核对 115 离线列表防止重复提交',
   SUBMISSION_NOT_FOUND: '核对 115 离线列表未发现该任务，可安全重试',
   CLOUD_PREPARE_FAILED: '115 云解压预检失败',
@@ -852,7 +858,10 @@ async function loadLogs() {
 async function loadP115() {
   const d = await fetch('/api/v1/settings/p115').then((r) => r.json());
   document.getElementById('p115-life').checked = !!d.life_monitor_enabled;
-  document.getElementById('p115-root').value = d.cloud_root_cid || '';
+  const rootInput = document.getElementById('p115-root');
+  if (d.cloud_root_cid || !rootInput.value.trim()) {
+    rootInput.value = d.cloud_root_cid || '';
+  }
   document.getElementById('p115-status').innerHTML = `
     <span class="badge ${d.has_cookie ? 'badge-ok' : 'badge-warn'}">${d.has_cookie ? '已保存加密凭据' : '未配置凭据'}</span>
     <span class="field-help">离线下载=${esc(d.offline_root_cid || '未设')} · 解压输出=${esc(d.cloud_output_cid || '未设')} · 归档区=${esc(d.cloud_archive_zone_cid || d.cloud_archive_cid || '未设')}</span>`;
@@ -866,11 +875,13 @@ async function saveP115(btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         cookie: document.getElementById('p115-cookie').value.trim(),
+        cloud_root_cid: document.getElementById('p115-root').value.trim(),
         life_monitor_enabled: document.getElementById('p115-life').checked,
       }),
     });
+    const d = await r.json().catch(() => ({}));
     document.getElementById('p115-cookie').value = '';
-    if (!r.ok) return showAlert('p115-alert', '保存 115 配置失败');
+    if (!r.ok) return showAlert('p115-alert', zhError(d.error?.code, d.error?.message) || '保存 115 配置失败');
     showToast('115 连接配置已加密保存');
     loadP115();
   } finally { btn.disabled = false; }
@@ -878,9 +889,27 @@ async function saveP115(btn) {
 async function initCloudRoot(btn) {
   hideAlert('p115-alert');
   const root_cid = document.getElementById('p115-root').value.trim();
-  if (!root_cid) return showAlert('p115-alert', '请先输入云根目录编号（CID）');
+  if (!root_cid) return showAlert('p115-alert', '请先输入云根目录编号（CID，网盘根目录可填 0）');
   btn.disabled = true;
   try {
+    // If the user pasted a Cookie without clicking Save first, save it automatically before initializing.
+    const pendingCookie = document.getElementById('p115-cookie').value.trim();
+    if (pendingCookie) {
+      const sr = await fetch('/api/v1/settings/p115', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cookie: pendingCookie,
+          cloud_root_cid: root_cid,
+          life_monitor_enabled: document.getElementById('p115-life').checked,
+        }),
+      });
+      if (!sr.ok) {
+        const sd = await sr.json().catch(() => ({}));
+        return showAlert('p115-alert', zhError(sd.error?.code, sd.error?.message) || '保存 115 凭据失败');
+      }
+      document.getElementById('p115-cookie').value = '';
+    }
     const r = await fetch('/api/v1/settings/p115/init-root', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
