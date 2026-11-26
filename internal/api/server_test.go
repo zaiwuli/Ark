@@ -266,6 +266,17 @@ func TestOfflineImportAPIIdempotencyTorrentAndBatchIsolation(t *testing.T) {
 	if aliasRec.Code != http.StatusAccepted {
 		t.Fatalf("json url alias expected 202, got %d: %s", aliasRec.Code, aliasRec.Body.String())
 	}
+
+	// Raw .torrent binary body (iOS Shortcuts "Request Body: File").
+	rawTorReq := httptest.NewRequest(http.MethodPost, "/api/v1/offline/import",
+		bytes.NewReader([]byte("d4:infod6:lengthi2048e4:name9:raw.7z.0112:piece lengthi16384e6:pieces20:11111111111111111111ee")))
+	rawTorReq.Header.Set("Authorization", "Bearer "+tokA)
+	rawTorReq.Header.Set("Content-Type", "application/x-bittorrent")
+	rawTorRec := httptest.NewRecorder()
+	h.ServeHTTP(rawTorRec, rawTorReq)
+	if rawTorRec.Code != http.StatusAccepted {
+		t.Fatalf("raw torrent body expected 202, got %d: %s", rawTorRec.Code, rawTorRec.Body.String())
+	}
 }
 
 func TestBarkPushAndPasswordsAndLocalScanAPI(t *testing.T) {

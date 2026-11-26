@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -38,6 +39,7 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	var res store.BatchResult
 	var err error
+	diagSummary := fmt.Sprintf("ct=%s", ct)
 
 	switch {
 	case strings.HasPrefix(ct, "multipart/form-data"):
@@ -49,26 +51,56 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 			r.FormValue("text"),
 			r.FormValue("url"),
 			r.FormValue("urls"),
+			r.FormValue("link"),
 			r.FormValue("links"),
 			r.FormValue("content"),
 		)
+		if strings.TrimSpace(textVal) == "" && r.MultipartForm != nil {
+			var extras []string
+			for k, vals := range r.MultipartForm.Value {
+				if strings.EqualFold(k, "auto_extract") {
+					continue
+				}
+				for _, v := range vals {
+					if strings.TrimSpace(v) != "" {
+						extras = append(extras, v)
+					}
+				}
+			}
+			textVal = strings.Join(extras, "\n")
+		}
 		autoExtract, ok := parseAutoExtractForm(r.FormValue("auto_extract"))
 		if !ok {
 			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "auto_extract must be boolean")
 			return
 		}
 		file, header, fileErr := r.FormFile("file")
+		if fileErr != nil && r.MultipartForm != nil {
+			// Fallback: accept the first uploaded file under any field name (common in iOS Shortcuts).
+			for _, fhs := range r.MultipartForm.File {
+				if len(fhs) > 0 {
+					if f, openErr := fhs[0].Open(); openErr == nil {
+						file, header, fileErr = f, fhs[0], nil
+						break
+					}
+				}
+			}
+		}
 		if fileErr == nil {
 			defer file.Close()
-			isTorrent := header != nil && strings.HasSuffix(strings.ToLower(header.Filename), ".torrent")
+			raw, readErr := io.ReadAll(io.LimitReader(file, maxImportRequestBytes+1))
+			if readErr != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "failed to read uploaded file")
+				return
+			}
+			if len(raw) > maxImportRequestBytes {
+				writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "uploaded file exceeds limit")
+				return
+			}
+			isTorrent := (header != nil && strings.HasSuffix(strings.ToLower(header.Filename), ".torrent")) || looksLikeTorrent(raw)
 			if isTorrent {
 				if strings.TrimSpace(textVal) != "" {
 					writeError(w, http.StatusUnprocessableEntity, "TORRENT_IMPORT_SEPARATELY", "cannot mix torrent file with link text")
-					return
-				}
-				raw, readErr := io.ReadAll(io.LimitReader(file, torrent.MaxTorrentBytes+1))
-				if readErr != nil {
-					writeError(w, http.StatusBadRequest, "INVALID_TORRENT", "failed to read torrent")
 					return
 				}
 				if len(raw) > torrent.MaxTorrentBytes {
@@ -77,25 +109,21 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 				}
 				res, err = s.pipeline.ImportTorrent(r.Context(), principal.TokenID, idemKey, raw, autoExtract)
 			} else {
-				// Non-torrent file (e.g. .txt link list from iOS Shortcuts or legacy 115tools clients).
-				raw, readErr := io.ReadAll(io.LimitReader(file, maxImportRequestBytes+1))
-				if readErr != nil {
-					writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "failed to read uploaded text file")
-					return
-				}
-				if len(raw) > maxImportRequestBytes {
-					writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "uploaded file exceeds limit")
-					return
-				}
 				fileText := strings.TrimPrefix(string(raw), "\xef\xbb\xbf")
 				if strings.TrimSpace(textVal) != "" {
 					textVal += "\n" + fileText
 				} else {
 					textVal = fileText
 				}
+				fname := ""
+				if header != nil {
+					fname = header.Filename
+				}
+				diagSummary = fmt.Sprintf("ct=multipart, file=%s, bytes=%d", fname, len(raw))
 				res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 			}
 		} else {
+			diagSummary = fmt.Sprintf("ct=multipart, text_len=%d", len(textVal))
 			res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 		}
 
@@ -108,14 +136,26 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 			r.FormValue("text"),
 			r.FormValue("url"),
 			r.FormValue("urls"),
+			r.FormValue("link"),
 			r.FormValue("links"),
 			r.FormValue("content"),
 		)
+		if strings.TrimSpace(textVal) == "" {
+			var extras []string
+			for k, vals := range r.Form {
+				if strings.EqualFold(k, "auto_extract") {
+					continue
+				}
+				extras = append(extras, vals...)
+			}
+			textVal = strings.Join(extras, "\n")
+		}
 		autoExtract, ok := parseAutoExtractForm(r.FormValue("auto_extract"))
 		if !ok {
 			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "auto_extract must be boolean")
 			return
 		}
+		diagSummary = fmt.Sprintf("ct=form, text_len=%d", len(textVal))
 		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 
 	default:
@@ -128,43 +168,83 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request exceeds limit")
 			return
 		}
+		// Auto-detect raw .torrent binary uploads (e.g. iOS Shortcuts "Request Body: File").
+		if looksLikeTorrent(raw) {
+			if len(raw) > torrent.MaxTorrentBytes {
+				writeError(w, http.StatusRequestEntityTooLarge, "TORRENT_SIZE_LIMIT", "torrent exceeds 2 MiB")
+				return
+			}
+			res, err = s.pipeline.ImportTorrent(r.Context(), principal.TokenID, idemKey, raw, true)
+			break
+		}
+
 		trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}))
 		autoExtract := true
 		var textVal string
+		var jsonKeys []string
 
-		if strings.HasPrefix(ct, "application/json") || (len(trimmed) > 0 && trimmed[0] == '{') {
-			var obj map[string]any
-			if decErr := json.Unmarshal(trimmed, &obj); decErr != nil {
+		if strings.HasPrefix(ct, "application/json") || (len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"')) {
+			var anyVal any
+			if decErr := json.Unmarshal(trimmed, &anyVal); decErr != nil {
 				if strings.HasPrefix(ct, "application/json") {
 					writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON payload")
 					return
 				}
 				textVal = string(trimmed)
 			} else {
-				textVal = extractTextFromJSONMap(obj)
-				if rawAuto, ok := obj["auto_extract"]; ok {
-					switch v := rawAuto.(type) {
-					case bool:
-						autoExtract = v
-					case string:
-						if parsed, bErr := strconv.ParseBool(strings.TrimSpace(v)); bErr == nil {
-							autoExtract = parsed
+				switch v := anyVal.(type) {
+				case map[string]any:
+					for k := range v {
+						jsonKeys = append(jsonKeys, k)
+					}
+					textVal = extractTextFromJSONMap(v)
+					if rawAuto, ok := v["auto_extract"]; ok {
+						switch b := rawAuto.(type) {
+						case bool:
+							autoExtract = b
+						case string:
+							if parsed, bErr := strconv.ParseBool(strings.TrimSpace(b)); bErr == nil {
+								autoExtract = parsed
+							}
 						}
 					}
+				case string:
+					textVal = v
+				case []any:
+					textVal = flattenJSONStrings(v)
 				}
 			}
 		} else {
 			// Plain text / raw body (compatible with legacy 115tools & iOS Shortcuts text body).
 			textVal = string(trimmed)
 		}
+
+		if strings.TrimSpace(textVal) == "" {
+			q := r.URL.Query()
+			textVal = firstNonEmpty(q.Get("text"), q.Get("url"), q.Get("link"), q.Get("links"))
+		}
+		diagSummary = fmt.Sprintf("ct=%s, bytes=%d, keys=%v", ct, len(raw), jsonKeys)
 		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 	}
 
 	if err != nil {
+		if errors.Is(err, links.ErrNoLinks) {
+			writeError(w, http.StatusUnprocessableEntity, "NO_LINKS",
+				"未识别到有效磁链/ed2k/HTTP链接（"+diagSummary+"）")
+			return
+		}
 		s.writeDomainError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, res)
+}
+
+func looksLikeTorrent(raw []byte) bool {
+	if len(raw) < 20 || len(raw) > torrent.MaxTorrentBytes || raw[0] != 'd' {
+		return false
+	}
+	_, err := torrent.ParseToMagnet(raw)
+	return err == nil
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -186,30 +266,52 @@ func parseAutoExtractForm(raw string) (bool, bool) {
 }
 
 func extractTextFromJSONMap(obj map[string]any) string {
-	keys := []string{"text", "url", "urls", "links", "content", "magnet", "data"}
-	var parts []string
+	keys := []string{"text", "url", "urls", "link", "links", "content", "magnet", "data"}
 	for _, k := range keys {
 		raw, ok := obj[k]
 		if !ok || raw == nil {
 			continue
 		}
-		switch v := raw.(type) {
-		case string:
-			if strings.TrimSpace(v) != "" {
-				parts = append(parts, v)
-			}
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-					parts = append(parts, s)
-				}
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
+		if s := flattenJSONStrings(raw); s != "" {
+			return s
 		}
 	}
-	return ""
+	// Fallback: collect all non-auto_extract string values in the JSON object.
+	var parts []string
+	for k, raw := range obj {
+		if strings.EqualFold(k, "auto_extract") || raw == nil {
+			continue
+		}
+		if s := flattenJSONStrings(raw); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func flattenJSONStrings(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case []any:
+		var parts []string
+		for _, item := range x {
+			if s := flattenJSONStrings(item); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		var parts []string
+		for _, val := range x {
+			if s := flattenJSONStrings(val); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
