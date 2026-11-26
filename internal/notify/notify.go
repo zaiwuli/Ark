@@ -50,14 +50,15 @@ type WebhookConfig struct {
 }
 
 type Message struct {
-	EventID    int64  `json:"event_id"`
-	PipelineID string `json:"pipeline_id"`
-	Kind       string `json:"kind"`
-	Stage      string `json:"stage"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	IsError    bool   `json:"is_error"`
-	Timestamp  int64  `json:"timestamp"`
+	EventID      int64  `json:"event_id"`
+	PipelineID   string `json:"pipeline_id"`
+	PipelineName string `json:"pipeline_name,omitempty"`
+	Kind         string `json:"kind"`
+	Stage        string `json:"stage"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	IsError      bool   `json:"is_error"`
+	Timestamp    int64  `json:"timestamp"`
 }
 
 func BuildHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
@@ -95,26 +96,19 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 		return err
 	}
 
-	icon := "ℹ️"
-	if msg.IsError {
-		icon = "❌"
-	} else if strings.Contains(msg.Kind, "SUCCEEDED") || strings.Contains(msg.Kind, "COMPLETED") {
-		icon = "✅"
-	} else if msg.Kind == "WAITING_APPROVAL" {
-		icon = "⚠️"
-	} else if msg.Kind == "TEST" {
-		icon = "🔔"
-	}
+	icon := eventIcon(msg.Kind, msg.IsError)
+	ts := time.Unix(msg.Timestamp, 0).Format("01-02 15:04:05")
 
-	ts := time.Unix(msg.Timestamp, 0).Format("2006-01-02 15:04:05")
-	text := fmt.Sprintf(
-		"%s <b>方舟 · %s</b>\n%s\n<code>阶段: %s · %s</code>",
-		icon,
-		html.EscapeString(msg.Title),
-		html.EscapeString(msg.Body),
-		html.EscapeString(zhStage(msg.Stage)),
-		ts,
-	)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("⛵ <b>方舟 · %s %s</b>\n", icon, html.EscapeString(msg.Title)))
+	sb.WriteString("━━━━━━━━━━━━━━━\n")
+	if name := strings.TrimSpace(msg.PipelineName); name != "" && !strings.Contains(msg.Body, name) {
+		sb.WriteString("📄 <code>" + html.EscapeString(shortenRunes(name, 60)) + "</code>\n")
+	}
+	sb.WriteString("💬 " + html.EscapeString(msg.Body) + "\n\n")
+	sb.WriteString(fmt.Sprintf("🏷 阶段：<code>%s</code>  ·  🕒 <code>%s</code>",
+		html.EscapeString(zhStage(msg.Stage)), ts))
+	text := sb.String()
 
 	bodyObj := map[string]any{
 		"chat_id":                  cfg.ChatID,
@@ -127,12 +121,12 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 			bodyObj["reply_markup"] = InlineKeyboardMarkup{
 				InlineKeyboard: [][]InlineButton{
 					{
-						{Text: "转本地 7-Zip 解压", CallbackData: "loc:" + msg.PipelineID},
-						{Text: "重试云解压", CallbackData: "rty:" + msg.PipelineID},
+						{Text: "🗜️ 转本地 7-Zip 解压", CallbackData: "loc:" + msg.PipelineID},
+						{Text: "🔁 重试云解压", CallbackData: "rty:" + msg.PipelineID},
 					},
 					{
-						{Text: "暂停任务", CallbackData: "can:" + msg.PipelineID},
-						{Text: "打开主菜单", CallbackData: "menu"},
+						{Text: "⏸️ 暂停任务", CallbackData: "can:" + msg.PipelineID},
+						{Text: "🏠 打开主菜单", CallbackData: "menu"},
 					},
 				},
 			}
@@ -140,8 +134,8 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 			bodyObj["reply_markup"] = InlineKeyboardMarkup{
 				InlineKeyboard: [][]InlineButton{
 					{
-						{Text: "立即重试", CallbackData: "rty:" + msg.PipelineID},
-						{Text: "查看失败列表", CallbackData: "tasks:failed"},
+						{Text: "🔁 立即重试", CallbackData: "rty:" + msg.PipelineID},
+						{Text: "📋 查看失败列表", CallbackData: "tasks:failed"},
 					},
 				},
 			}
@@ -266,6 +260,11 @@ func (d *Dispatcher) Flush(ctx context.Context) error {
 
 	for _, ev := range events {
 		msg := toMessage(ev)
+		if ev.PipelineID != "" && ev.PipelineID != "system" {
+			if p, err := d.store.GetPipeline(ctx, ev.PipelineID); err == nil && strings.TrimSpace(p.Name) != "" {
+				msg.PipelineName = p.Name
+			}
+		}
 		var firstErr error
 		attempted := false
 		if tgCfg.Enabled && shouldSend(tgCfg.Mode, ev.Kind) {
@@ -332,6 +331,62 @@ func toMessage(ev store.TaskEvent) Message {
 		IsError:    isErr,
 		Timestamp:  ev.CreatedAt,
 	}
+}
+
+func eventIcon(kind string, isErr bool) string {
+	switch kind {
+	case "SUCCEEDED":
+		return "🎉"
+	case "OFFLINE_SUCCEEDED":
+		return "✅"
+	case "NO_ARCHIVE_FOUND":
+		return "📂"
+	case "SEED_CLEANUP_COMPLETED":
+		return "🧹"
+	case "DATE_ORGANIZED":
+		return "🗂️"
+	case "WAITING_APPROVAL", "ARCHIVE_MOVE_WARN":
+		return "⚠️"
+	case "SUBMISSION_UNKNOWN":
+		return "🔍"
+	case "BARK_WINDOW_FIRED":
+		return "📡"
+	case "BARK_TARGET_CHECKED":
+		return "🔎"
+	case "BARK_PATH_FAILED":
+		return "🚨"
+	case "CLOUD_SOURCE_SCANNED":
+		return "☁️"
+	case "DISCOVERED":
+		return "📦"
+	case "SUBMITTED":
+		return "🚀"
+	case "ARCHIVE_HANDOFF":
+		return "📤"
+	case "CLOUD_EXPORT_STARTED":
+		return "⚡"
+	case "CLOUD_EXTRACT_RETRIED":
+		return "🔁"
+	case "AUTO_LOCAL_FALLBACK", "LOCAL_FALLBACK_APPROVED":
+		return "📥"
+	case "LOCAL_EXTRACT_STARTED":
+		return "🗜️"
+	case "TEST":
+		return "🔔"
+	default:
+		if isErr {
+			return "❌"
+		}
+		return "ℹ️"
+	}
+}
+
+func shortenRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func zhStage(stage string) string {
