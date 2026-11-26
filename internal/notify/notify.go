@@ -88,7 +88,7 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 		icon,
 		html.EscapeString(msg.Title),
 		html.EscapeString(msg.Body),
-		html.EscapeString(msg.Stage),
+		html.EscapeString(zhStage(msg.Stage)),
 		ts,
 	)
 
@@ -232,8 +232,10 @@ func toMessage(ev store.TaskEvent) Message {
 		"FAILED":                "任务失败",
 		"SUBMIT_FAILED":         "离线提交失败",
 		"SUBMISSION_UNKNOWN":    "提交状态待核对",
-		"WAITING_APPROVAL":      "等待确认本地兜底",
-		"NO_ARCHIVE_FOUND":      "离线完成（无压缩包）",
+		"WAITING_APPROVAL":       "等待确认本地兜底",
+		"NO_ARCHIVE_FOUND":       "离线完成（无压缩包）",
+		"DATE_ORGANIZED":         "日期目录整理完成",
+		"CLOUD_EXTRACT_RETRIED":  "云解压自动重试",
 	}
 	title := titleMap[ev.Kind]
 	if title == "" {
@@ -249,4 +251,29 @@ func toMessage(ev store.TaskEvent) Message {
 		IsError:    isErr,
 		Timestamp:  ev.CreatedAt,
 	}
+}
+
+func zhStage(stage string) string {
+	m := map[string]string{
+		"offline_submit": "离线提交",
+		"offline_poll":   "离线轮询",
+		"seed_cleanup":   "种子清理",
+		"discover":       "压缩包发现",
+		"cloud_prepare":  "云解压预检",
+		"cloud_inspect":  "云解压分析",
+		"cloud_export":   "云解压导出",
+		"cloud_progress": "云解压轮询",
+		"local_fallback": "本地兜底确认",
+		"cache":          "直链缓存",
+		"local_extract":  "本地解压",
+		"cloud_monitor":  "云端监测",
+		"bark":           "Bark 联动",
+		"organize":       "目录整理",
+		"complete":       "处理完成",
+		"test":           "连通测试",
+	}
+	if v, ok := m[stage]; ok {
+		return v
+	}
+	return stage
 }

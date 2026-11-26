@@ -7,21 +7,41 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/zaiwuli/Ark/internal/config"
+	"github.com/zaiwuli/Ark/internal/pipeline"
 	"github.com/zaiwuli/Ark/internal/store"
 )
 
-func (s *Server) cacheRootDir() string {
+func (s *Server) cacheDirs() []string {
+	dirs := []string{config.LocalCacheDir(s.cfg.DataDir, s.cfg.WorkDir)}
 	if s.cfg.WorkDir != "" {
-		return filepath.Join(s.cfg.WorkDir, "cache")
+		legacy := filepath.Join(s.cfg.WorkDir, "cache")
+		if legacy != dirs[0] {
+			dirs = append(dirs, legacy)
+		}
+	} else {
+		legacy := filepath.Join(s.cfg.DataDir, "cache")
+		if legacy != dirs[0] {
+			dirs = append(dirs, legacy)
+		}
 	}
-	return filepath.Join(s.cfg.DataDir, "cache")
+	return dirs
 }
 
-func (s *Server) outputRootDir() string {
+func (s *Server) outputDirs() []string {
+	dirs := []string{config.LocalOutputDir(s.cfg.DataDir, s.cfg.WorkDir)}
 	if s.cfg.WorkDir != "" {
-		return filepath.Join(s.cfg.WorkDir, "output")
+		legacy := filepath.Join(s.cfg.WorkDir, "output")
+		if legacy != dirs[0] {
+			dirs = append(dirs, legacy)
+		}
+	} else {
+		legacy := filepath.Join(s.cfg.DataDir, "output")
+		if legacy != dirs[0] {
+			dirs = append(dirs, legacy)
+		}
 	}
-	return filepath.Join(s.cfg.DataDir, "output")
+	return dirs
 }
 
 func measureDir(root string) (int64, int) {
@@ -40,21 +60,54 @@ func measureDir(root string) (int64, int) {
 	return total, files
 }
 
+func findOrphanStageDirs(outRoot string) []string {
+	var found []string
+	entries, err := os.ReadDir(outRoot)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		full := filepath.Join(outRoot, name)
+		if strings.HasPrefix(name, ".ark-stage-") || strings.HasPrefix(name, ".ark-squash-") {
+			found = append(found, full)
+			continue
+		}
+		// Also check inside YYYY-MM-DD date folders.
+		if len(name) == 10 && name[4] == '-' && name[7] == '-' {
+			if sub, subErr := os.ReadDir(full); subErr == nil {
+				for _, se := range sub {
+					if se.IsDir() && (strings.HasPrefix(se.Name(), ".ark-stage-") || strings.HasPrefix(se.Name(), ".ark-squash-")) {
+						found = append(found, filepath.Join(full, se.Name()))
+					}
+				}
+			}
+		}
+	}
+	return found
+}
+
 func (s *Server) handleMaintenanceSummary(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.store.MaintenanceStats(r.Context(), s.cfg.DBPath())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load maintenance stats")
 		return
 	}
-	cacheBytes, cacheFiles := measureDir(s.cacheRootDir())
-	// Also count orphaned .ark-stage-* dirs in output directory.
-	if entries, err := os.ReadDir(s.outputRootDir()); err == nil {
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), ".ark-stage-") {
-				b, f := measureDir(filepath.Join(s.outputRootDir(), e.Name()))
-				cacheBytes += b
-				cacheFiles += f
-			}
+	var cacheBytes int64
+	var cacheFiles int
+	for _, cDir := range s.cacheDirs() {
+		b, f := measureDir(cDir)
+		cacheBytes += b
+		cacheFiles += f
+	}
+	for _, oDir := range s.outputDirs() {
+		for _, orphan := range findOrphanStageDirs(oDir) {
+			b, f := measureDir(orphan)
+			cacheBytes += b
+			cacheFiles += f
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -73,8 +126,11 @@ func (s *Server) handleReclaimCache(w http.ResponseWriter, r *http.Request) {
 	var freedBytes int64
 	var removedItems int
 
-	cacheRoot := s.cacheRootDir()
-	if entries, err := os.ReadDir(cacheRoot); err == nil {
+	for _, cacheRoot := range s.cacheDirs() {
+		entries, err := os.ReadDir(cacheRoot)
+		if err != nil {
+			continue
+		}
 		for _, e := range entries {
 			if activeIDs[e.Name()] {
 				continue
@@ -99,29 +155,25 @@ func (s *Server) handleReclaimCache(w http.ResponseWriter, r *http.Request) {
 
 	// Clean orphaned temporary staging directories only if no local extraction is active.
 	if len(activeIDs) == 0 {
-		outRoot := s.outputRootDir()
-		if entries, err := os.ReadDir(outRoot); err == nil {
-			for _, e := range entries {
-				if e.IsDir() && (strings.HasPrefix(e.Name(), ".ark-stage-") || strings.HasPrefix(e.Name(), ".ark-squash-")) {
-					full := filepath.Join(outRoot, e.Name())
-					b, f := measureDir(full)
-					if os.RemoveAll(full) == nil {
-						freedBytes += b
-						if f == 0 {
-							f = 1
-						}
-						removedItems += f
+		for _, outRoot := range s.outputDirs() {
+			for _, orphan := range findOrphanStageDirs(outRoot) {
+				b, f := measureDir(orphan)
+				if os.RemoveAll(orphan) == nil {
+					freedBytes += b
+					if f == 0 {
+						f = 1
 					}
+					removedItems += f
 				}
 			}
 		}
 	}
 
 	_ = s.store.RecordEvent(r.Context(), "system", "CACHE_RECLAIMED", "complete",
-		"手动回收本地缓存与临时残留目录完成", false)
+		"手动回收本地下载缓存与临时残留目录完成", false)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"freed_bytes":   freedBytes,
-		"removed_items": removedItems,
+		"freed_bytes":    freedBytes,
+		"removed_items":  removedItems,
 		"skipped_active": len(activeIDs),
 	})
 }
@@ -179,4 +231,68 @@ func (s *Server) handleVacuumDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleGetArchiveRule(w http.ResponseWriter, r *http.Request) {
+	rule := s.pipeline.ArchiveRule(r.Context())
+	writeJSON(w, http.StatusOK, rule)
+}
+
+func (s *Server) handlePutArchiveRule(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.ArchiveRuleConfig
+	if err := decodeJSON(r, &req, 16*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	saved, err := s.pipeline.SaveArchiveRule(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleTriggerCloudScan(w http.ResponseWriter, r *http.Request) {
+	adopted, err := s.pipeline.ScanCloudSources(r.Context(), nil)
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"adopted": adopted})
+}
+
+func (s *Server) handleGetOrganizerConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.pipeline.OrganizerConfig(r.Context()))
+}
+
+func (s *Server) handlePutOrganizerConfig(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.OrganizerConfig
+	if err := decodeJSON(r, &req, 16*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	saved, err := s.pipeline.SaveOrganizerConfig(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handlePreviewOrganize(w http.ResponseWriter, r *http.Request) {
+	plan, err := s.pipeline.PreviewOrganize(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) handleRunOrganize(w http.ResponseWriter, r *http.Request) {
+	res, err := s.pipeline.RunOrganize(r.Context(), false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

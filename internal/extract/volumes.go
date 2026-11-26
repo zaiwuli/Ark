@@ -34,6 +34,24 @@ func IsArchiveExt(name string) bool {
 	return numericRe.MatchString(name) || oldRarRe.MatchString(name) || zipSplitRe.MatchString(name)
 }
 
+// IsPrimaryArchiveName reports whether a filename (e.g., on 115 cloud) is an archive primary entry
+// and not a secondary split-volume part (.part2.rar, .002, .r01, .z01).
+func IsPrimaryArchiveName(name string) bool {
+	base := filepath.Base(name)
+	if m := partRarRe.FindStringSubmatch(base); len(m) == 3 {
+		num, _ := strconv.Atoi(m[2])
+		return num == 1
+	}
+	if m := numericRe.FindStringSubmatch(base); len(m) == 3 {
+		num, _ := strconv.Atoi(m[2])
+		return num == 1
+	}
+	if oldRarRe.MatchString(base) || zipSplitRe.MatchString(base) {
+		return false
+	}
+	return IsArchiveExt(base)
+}
+
 // InspectVolume checks whether filePath is an archive, whether it is the primary volume,
 // and whether all companion split-volume parts are present on disk.
 func InspectVolume(filePath string) VolumeStatus {

@@ -22,13 +22,14 @@ func TestOfflineTorrentToSeedCleanupEndToEnd(t *testing.T) {
 	svc := NewService(st, "Asia/Shanghai")
 	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1"})
 
-	// 1. Initialize cloud root -> creates 4 managed folders.
+	// 1. Initialize cloud root -> creates 3 top-level folders + 3 archive-zone subfolders.
 	cfg, err := svc.InitCloudRoot(t.Context(), "root_100")
 	if err != nil {
 		t.Fatalf("InitCloudRoot: %v", err)
 	}
-	if cfg.OfflineRootCID == "" || cfg.CloudOutputCID == "" || cfg.CloudArchiveCID == "" || cfg.CloudFailedCID == "" {
-		t.Fatalf("expected all 4 managed folders, got %+v", cfg)
+	if cfg.OfflineRootCID == "" || cfg.CloudOutputCID == "" || cfg.CloudArchiveZoneCID == "" ||
+		cfg.CloudArchiveCID == "" || cfg.CloudFailedCID == "" || cfg.CloudHistoryCID == "" {
+		t.Fatalf("expected all 3-folder + archive-zone folders, got %+v", cfg)
 	}
 
 	// 2. Configure seed cleanup rule (real delete of .txt files).

@@ -7,23 +7,29 @@ import (
 
 // MockClient is a deterministic in-memory Port for unit and integration tests.
 type MockClient struct {
-	mu          sync.Mutex
-	Folders     map[string]string
-	Listings    map[string][]CloudFile
-	Paths       map[string][]string
-	Submissions [][]string
-	SubmitErr   error
-	Snapshots   []OfflineTask
-	Deleted     []string
-	Moved       []string
-	Life        []LifeEvent
+	mu               sync.Mutex
+	Folders          map[string]string
+	folderIDs        map[string]bool
+	Listings         map[string][]CloudFile
+	Paths            map[string][]string
+	Submissions      [][]string
+	SubmitErr        error
+	Snapshots        []OfflineTask
+	Deleted          []string
+	Moved            []string
+	Life             []LifeEvent
+	PrepareStatuses  []string // optional sequence for testing retry / password / failure
+	PrepareCallCount int
+	ExtractStatuses  []string // optional sequence for testing cloud extract progress / failure
+	ExtractCallCount int
 }
 
 func NewMockClient() *MockClient {
 	return &MockClient{
-		Folders:  make(map[string]string),
-		Listings: make(map[string][]CloudFile),
-		Paths:    make(map[string][]string),
+		Folders:   make(map[string]string),
+		folderIDs: make(map[string]bool),
+		Listings:  make(map[string][]CloudFile),
+		Paths:     make(map[string][]string),
 	}
 }
 
@@ -54,6 +60,10 @@ func (m *MockClient) EnsureFolder(_ context.Context, parentCID, name string) (st
 		return id, nil
 	}
 	id := "cid_" + name
+	if m.folderIDs[id] {
+		id = "cid_" + parentCID + "_" + name
+	}
+	m.folderIDs[id] = true
 	m.Folders[key] = id
 	m.Paths[id] = []string{"0", parentCID, id}
 	return id, nil
@@ -63,6 +73,15 @@ func (m *MockClient) MoveVerified(_ context.Context, loc FileLocator, targetCID 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Moved = append(m.Moved, loc.FID+"->"+targetCID)
+	if list, ok := m.Listings[loc.CID]; ok {
+		filtered := list[:0]
+		for _, f := range list {
+			if f.FID != loc.FID {
+				filtered = append(filtered, f)
+			}
+		}
+		m.Listings[loc.CID] = filtered
+	}
 	return nil
 }
 
@@ -100,6 +119,13 @@ func (m *MockClient) OfflineSnapshot(_ context.Context) ([]OfflineTask, error) {
 }
 
 func (m *MockClient) PrepareExtract(_ context.Context, _, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := m.PrepareCallCount
+	m.PrepareCallCount++
+	if idx < len(m.PrepareStatuses) {
+		return m.PrepareStatuses[idx], nil
+	}
 	return "success", nil
 }
 func (m *MockClient) InspectExtract(_ context.Context, _ string) (string, error) {
@@ -109,6 +135,13 @@ func (m *MockClient) StartExtract(_ context.Context, _, _ string) (string, error
 	return "ext_1", nil
 }
 func (m *MockClient) ExtractStatus(_ context.Context, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := m.ExtractCallCount
+	m.ExtractCallCount++
+	if idx < len(m.ExtractStatuses) {
+		return m.ExtractStatuses[idx], nil
+	}
 	return "success", nil
 }
 func (m *MockClient) ArchiveManifest(_ context.Context, _ string) ([]ArchiveEntry, error) {

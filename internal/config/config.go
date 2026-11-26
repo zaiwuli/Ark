@@ -58,13 +58,74 @@ func (c Config) SecretKeyPath() string {
 	return filepath.Join(c.DataDir, "secret.key")
 }
 
+func (c Config) LocalWatchDir() string {
+	return LocalWatchDir(c.DataDir, c.WorkDir)
+}
+
+func (c Config) LocalOutputDir() string {
+	return LocalOutputDir(c.DataDir, c.WorkDir)
+}
+
+func (c Config) LocalOriginalsDir() string {
+	return LocalOriginalsDir(c.DataDir, c.WorkDir)
+}
+
+func (c Config) LocalCacheDir() string {
+	return LocalCacheDir(c.DataDir, c.WorkDir)
+}
+
+func (c Config) LocalHistoryDir() string {
+	return LocalHistoryDir(c.DataDir, c.WorkDir)
+}
+
+func baseWorkDir(dataDir, workDir string) string {
+	if workDir != "" {
+		return workDir
+	}
+	if dataDir != "" {
+		return dataDir
+	}
+	return "data"
+}
+
+// Local 3-folder layout: 本地监控 / 解压输出 / 归档区/{原包留存, 下载缓存, 历史归档}
+func LocalWatchDir(dataDir, workDir string) string {
+	return filepath.Join(baseWorkDir(dataDir, workDir), "本地监控")
+}
+
+func LocalOutputDir(dataDir, workDir string) string {
+	return filepath.Join(baseWorkDir(dataDir, workDir), "解压输出")
+}
+
+func LocalArchiveZoneDir(dataDir, workDir string) string {
+	return filepath.Join(baseWorkDir(dataDir, workDir), "归档区")
+}
+
+func LocalOriginalsDir(dataDir, workDir string) string {
+	return filepath.Join(LocalArchiveZoneDir(dataDir, workDir), "原包留存")
+}
+
+func LocalCacheDir(dataDir, workDir string) string {
+	return filepath.Join(LocalArchiveZoneDir(dataDir, workDir), "下载缓存")
+}
+
+func LocalHistoryDir(dataDir, workDir string) string {
+	return filepath.Join(LocalArchiveZoneDir(dataDir, workDir), "历史归档")
+}
+
 func (c Config) EnsureDirs() error {
 	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
 		return err
 	}
 	if c.WorkDir != "" {
-		for _, sub := range []string{"watch", "output", "cache", "archive"} {
-			if err := os.MkdirAll(filepath.Join(c.WorkDir, sub), 0o755); err != nil {
+		for _, dir := range []string{
+			c.LocalWatchDir(),
+			c.LocalOutputDir(),
+			c.LocalOriginalsDir(),
+			c.LocalCacheDir(),
+			c.LocalHistoryDir(),
+		} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return err
 			}
 		}

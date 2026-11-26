@@ -55,8 +55,8 @@ func main() {
 		StableWindow:     15 * time.Second,
 	})
 	notifier := notify.NewDispatcher(st)
-	barkRecv := bark.NewReceiver(st, bark.DefaultWindowDuration, func(ctx context.Context) {
-		if _, err := pipeSvc.TriggerLifeCheck(ctx); err != nil {
+	barkRecv := bark.NewReceiver(st, bark.DefaultWindowDuration, func(ctx context.Context, sourceIDs []string) {
+		if _, err := pipeSvc.HandleBarkTrigger(ctx, sourceIDs); err != nil {
 			logger.Warn("bark-triggered cloud check failed", "err", err)
 		}
 	})

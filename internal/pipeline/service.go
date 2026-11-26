@@ -29,22 +29,21 @@ var (
 )
 
 type P115Settings struct {
-	Enabled            bool   `json:"enabled"`
-	Cookie             string `json:"cookie"`
-	CloudRootCID       string `json:"cloud_root_cid"`
-	OfflineRootCID     string `json:"offline_root_cid"`
-	CloudOutputCID     string `json:"cloud_output_cid"`
-	CloudArchiveCID    string `json:"cloud_archive_cid"`
-	CloudFailedCID     string `json:"cloud_failed_cid"`
-	CloudExtractByDate *bool  `json:"cloud_extract_by_date,omitempty"`
-	LifeMonitorEnabled bool   `json:"life_monitor_enabled"`
+	Enabled             bool   `json:"enabled"`
+	Cookie              string `json:"cookie"`
+	CloudRootCID        string `json:"cloud_root_cid"`
+	OfflineRootCID      string `json:"offline_root_cid"`
+	CloudOutputCID      string `json:"cloud_output_cid"`
+	CloudArchiveZoneCID string `json:"cloud_archive_zone_cid"`
+	CloudArchiveCID     string `json:"cloud_archive_cid"`
+	CloudFailedCID      string `json:"cloud_failed_cid"`
+	CloudHistoryCID     string `json:"cloud_history_cid"`
+	CloudExtractByDate  *bool  `json:"cloud_extract_by_date,omitempty"`
+	LifeMonitorEnabled  bool   `json:"life_monitor_enabled"`
 }
 
 func (c P115Settings) ExtractByDateEnabled() bool {
-	if c.CloudExtractByDate == nil {
-		return true
-	}
-	return *c.CloudExtractByDate
+	return true
 }
 
 type PipelinePolicy struct {
@@ -64,13 +63,14 @@ type Service struct {
 	extractBin       string
 	extractMaxDictMB int
 
-	mu           sync.RWMutex
-	cloud        p115.Port
-	portPinned   bool
-	p115Cfg      P115Settings
-	dateCache    map[string]string // "root:YYYY-MM-DD" -> cid
-	lastLifeRun  int64
-	lastLifeSeen int64
+	mu            sync.RWMutex
+	cloud         p115.Port
+	portPinned    bool
+	p115Cfg       P115Settings
+	dateCache     map[string]string // "root:YYYY-MM-DD" -> cid
+	lastLifeRun   int64
+	lastLifeSeen  int64
+	lastCloudScan int64
 }
 
 type ServiceOptions struct {
@@ -178,20 +178,20 @@ func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P1
 	if incoming.CloudOutputCID == "" {
 		incoming.CloudOutputCID = existing.CloudOutputCID
 	}
+	if incoming.CloudArchiveZoneCID == "" {
+		incoming.CloudArchiveZoneCID = existing.CloudArchiveZoneCID
+	}
 	if incoming.CloudArchiveCID == "" {
 		incoming.CloudArchiveCID = existing.CloudArchiveCID
 	}
 	if incoming.CloudFailedCID == "" {
 		incoming.CloudFailedCID = existing.CloudFailedCID
 	}
-	if incoming.CloudExtractByDate == nil {
-		if existing.CloudExtractByDate != nil {
-			incoming.CloudExtractByDate = existing.CloudExtractByDate
-		} else {
-			def := true
-			incoming.CloudExtractByDate = &def
-		}
+	if incoming.CloudHistoryCID == "" {
+		incoming.CloudHistoryCID = existing.CloudHistoryCID
 	}
+	def := true
+	incoming.CloudExtractByDate = &def
 
 	if err := s.store.SetSetting(ctx, "p115.config", incoming, true); err != nil {
 		return P115Settings{}, err
@@ -203,6 +203,8 @@ func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P1
 	return incoming, nil
 }
 
+// InitCloudRoot creates the clean 3-folder cloud layout:
+// <root>/离线下载, <root>/解压输出, <root>/归档区/{原包留存, 异常待查, 历史归档}
 func (s *Service) InitCloudRoot(ctx context.Context, rootCID string) (P115Settings, error) {
 	rootCID = strings.TrimSpace(rootCID)
 	if rootCID == "" {
@@ -218,30 +220,47 @@ func (s *Service) InitCloudRoot(ctx context.Context, rootCID string) (P115Settin
 		return P115Settings{}, err
 	}
 
-	folders := []struct {
+	cfg.CloudRootCID = rootCID
+	topFolders := []struct {
 		target *string
 		name   string
 	}{
-		{&cfg.OfflineRootCID, "离线目录"},
-		{&cfg.CloudOutputCID, "解压目录"},
-		{&cfg.CloudArchiveCID, "归档目录"},
-		{&cfg.CloudFailedCID, "失败目录"},
+		{&cfg.OfflineRootCID, "离线下载"},
+		{&cfg.CloudOutputCID, "解压输出"},
+		{&cfg.CloudArchiveZoneCID, "归档区"},
 	}
-	cfg.CloudRootCID = rootCID
-	for _, f := range folders {
+	for _, f := range topFolders {
 		cid, err := cloud.EnsureFolder(ctx, rootCID, f.name)
 		if err != nil {
 			return P115Settings{}, err
 		}
 		*f.target = cid
 	}
+
+	zoneFolders := []struct {
+		target *string
+		name   string
+	}{
+		{&cfg.CloudArchiveCID, "原包留存"},
+		{&cfg.CloudFailedCID, "异常待查"},
+		{&cfg.CloudHistoryCID, "历史归档"},
+	}
+	for _, f := range zoneFolders {
+		cid, err := cloud.EnsureFolder(ctx, cfg.CloudArchiveZoneCID, f.name)
+		if err != nil {
+			return P115Settings{}, err
+		}
+		*f.target = cid
+	}
+
 	saved, err := s.SaveP115Config(ctx, cfg)
 	if err != nil {
 		return P115Settings{}, err
 	}
 	_ = s.store.RecordEvent(ctx, "system", "CLOUD_ROOT_INITIALIZED", "cloud_monitor",
-		fmt.Sprintf("云根目录(%s)初始化完成：离线=%s 解压=%s 归档=%s 失败=%s",
-			rootCID, saved.OfflineRootCID, saved.CloudOutputCID, saved.CloudArchiveCID, saved.CloudFailedCID), false)
+		fmt.Sprintf("云根目录(%s)初始化完成：离线下载=%s 解压输出=%s 归档区=%s（原包留存=%s 异常待查=%s 历史归档=%s）",
+			rootCID, saved.OfflineRootCID, saved.CloudOutputCID, saved.CloudArchiveZoneCID,
+			saved.CloudArchiveCID, saved.CloudFailedCID, saved.CloudHistoryCID), false)
 	return saved, nil
 }
 
@@ -335,42 +354,51 @@ func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
 }
 
 func (s *Service) Tick(ctx context.Context) error {
+	// Always flush pending notifications (including local-only mode without 115 configured).
+	defer func() {
+		if s.notifier != nil {
+			_ = s.notifier.Flush(ctx)
+		}
+	}()
+
 	// 1. Local/NAS directory watch & local extractions run even without 115 configured.
 	if s.localWatcher != nil {
-		_, _ = s.localWatcher.Scan(ctx, time.Now())
+		_, _ = s.localWatcher.Scan(ctx, time.Now().In(s.loc))
 	}
 	if err := s.stepLocalExtractions(ctx); err != nil {
 		return err
 	}
 
-	// 2. Cloud offline, discovery, seed cleanup, cloud extract, and life-event checks.
+	// 2. Cloud offline, discovery, seed cleanup, cloud watched sources, cloud extract, and life-event checks.
 	cloud, cfg := s.snapshotCloud()
-	if cloud == nil {
-		return nil
-	}
-	if cfg.OfflineRootCID != "" {
-		if err := s.submitQueued(ctx, cloud, cfg.OfflineRootCID); err != nil {
+	if cloud != nil {
+		if cfg.OfflineRootCID != "" {
+			if err := s.submitQueued(ctx, cloud, cfg.OfflineRootCID); err != nil {
+				return err
+			}
+			if err := s.pollActive(ctx, cloud); err != nil {
+				return err
+			}
+			if err := s.runSeedCleanups(ctx, cloud, cfg.OfflineRootCID); err != nil {
+				return err
+			}
+			if err := s.discoverOfflineArchives(ctx, cloud, cfg); err != nil {
+				return err
+			}
+		}
+		if time.Now().Unix()-s.lastCloudScan >= 300 {
+			_, _ = s.ScanCloudSources(ctx, nil)
+		}
+		if err := s.stepCloudArchives(ctx, cloud, cfg); err != nil {
 			return err
 		}
-		if err := s.pollActive(ctx, cloud); err != nil {
-			return err
-		}
-		if err := s.runSeedCleanups(ctx, cloud, cfg.OfflineRootCID); err != nil {
-			return err
-		}
-		if err := s.discoverOfflineArchives(ctx, cloud, cfg); err != nil {
-			return err
+		if cfg.LifeMonitorEnabled && time.Now().Unix()-s.lastLifeRun >= 1800 {
+			_, _ = s.TriggerLifeCheck(ctx)
 		}
 	}
-	if err := s.stepCloudArchives(ctx, cloud, cfg); err != nil {
-		return err
-	}
-	if cfg.LifeMonitorEnabled && time.Now().Unix()-s.lastLifeRun >= 1800 {
-		_, _ = s.TriggerLifeCheck(ctx)
-	}
-	if s.notifier != nil {
-		_ = s.notifier.Flush(ctx)
-	}
+
+	// 3. Optional periodic date-folder organization (runs at most once per month/day when enabled).
+	s.maybeAutoOrganize(ctx)
 	return nil
 }
 
@@ -598,20 +626,43 @@ func (s *Service) runSeedCleanups(ctx context.Context, cloud p115.Port, offlineR
 			_ = s.store.RecordEvent(ctx, p.ID, "SEED_CLEANUP_FAILED", "seed_cleanup", "种子下载成功，清理失败："+report.Error, true)
 			continue
 		}
-		p.State = "completed"
-		p.Stage = "complete"
-		p.ErrorCode = ""
-		p.ErrorMessage = ""
-		p.CompletedAt = &now
-		p.NextRunAt = 0
+		if p.AutoExtract || (pol.SeedCleanup != nil && pol.SeedCleanup.AutoExtract) {
+			p.State = "discover"
+			p.Stage = "discover"
+			p.ErrorCode = ""
+			p.ErrorMessage = ""
+			p.NextRunAt = now
+		} else {
+			p.State = "completed"
+			p.Stage = "complete"
+			p.ErrorCode = ""
+			p.ErrorMessage = ""
+			p.CompletedAt = &now
+			p.NextRunAt = 0
+		}
 		_ = s.store.UpdatePipeline(ctx, p)
 	}
 	return nil
 }
 
-// TriggerLifeCheck runs an incremental 115 life-events scan and returns newly observed archive count.
+// HandleBarkTrigger runs targeted scans for Bark-matched cloud sources (or all enabled cloud sources if none matched).
+func (s *Service) HandleBarkTrigger(ctx context.Context, sourceIDs []string) (int, error) {
+	adopted, err := s.ScanCloudSources(ctx, sourceIDs)
+	if err != nil {
+		return adopted, err
+	}
+	_, cfg := s.snapshotCloud()
+	if cfg.LifeMonitorEnabled {
+		if n, lifeErr := s.TriggerLifeCheck(ctx); lifeErr == nil {
+			adopted += n
+		}
+	}
+	return adopted, nil
+}
+
+// TriggerLifeCheck runs an incremental 115 life-events scan and adopts newly observed archives in monitored folders.
 func (s *Service) TriggerLifeCheck(ctx context.Context) (int, error) {
-	cloud, _ := s.snapshotCloud()
+	cloud, cfg := s.snapshotCloud()
 	if cloud == nil {
 		return 0, ErrP115NotConfigured
 	}
@@ -625,19 +676,49 @@ func (s *Service) TriggerLifeCheck(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	s.lastLifeRun = now
+
+	watchedCIDs := make(map[string]string) // cid -> sourceID
+	if sources, sErr := s.store.ListSources(ctx, "cloud"); sErr == nil {
+		for _, src := range sources {
+			if !src.Enabled {
+				continue
+			}
+			var sc struct {
+				CID string `json:"cid"`
+			}
+			if json.Unmarshal([]byte(src.ConfigJSON), &sc) == nil && strings.TrimSpace(sc.CID) != "" {
+				watchedCIDs[strings.TrimSpace(sc.CID)] = src.ID
+			}
+		}
+	}
+	rule := s.ArchiveRule(ctx)
+	today := time.Now().In(s.loc).Format("2006-01-02")
+
 	maxTime := since
 	archivesFound := 0
+	adopted := 0
 	for _, ev := range events {
 		if ev.Time > maxTime {
 			maxTime = ev.Time
 		}
-		if isArchiveName(ev.Name) {
+		if extract.IsPrimaryArchiveName(ev.Name) {
 			archivesFound++
+			if ev.FID != "" && ev.Pickcode != "" {
+				if srcID, ok := watchedCIDs[ev.CID]; ok || (cfg.OfflineRootCID != "" && ev.CID == cfg.OfflineRootCID) {
+					cf := p115.CloudFile{
+						FID: ev.FID, CID: ev.CID, Name: ev.Name,
+						Size: ev.Size, Pickcode: ev.Pickcode, SHA1: ev.SHA1,
+					}
+					if okCreated := s.adoptCloudArchive(ctx, "", srcID, cf, today, cfg, rule); okCreated {
+						adopted++
+					}
+				}
+			}
 		}
 	}
 	s.lastLifeSeen = maxTime
 	_ = s.store.RecordEvent(ctx, "system", "LIFE_MONITOR_CHECK", "cloud_monitor",
-		fmt.Sprintf("生活事件增量检查完成：读取 %d 条，发现压缩包 %d 个", len(events), archivesFound), false)
+		fmt.Sprintf("生活事件增量检查完成：读取 %d 条，发现压缩包 %d 个，新入队 %d 个", len(events), archivesFound, adopted), false)
 	return archivesFound, nil
 }
 

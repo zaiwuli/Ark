@@ -36,6 +36,7 @@ const STAGE_ZH = {
   complete: '处理完成',
   cloud_monitor: '云端监测',
   bark: 'Bark 联动触发',
+  organize: '目录整理',
   test: '通道测试',
 };
 
@@ -49,6 +50,11 @@ const EVENT_KIND_ZH = {
   NO_ARCHIVE_FOUND: '无压缩包',
   DISCOVERED: '发现压缩包',
   CLOUD_EXPORT_STARTED: '启动云解压',
+  CLOUD_EXTRACT_RETRIED: '云解压自动重试',
+  CLOUD_SOURCE_SCANNED: '扫描云监控目录',
+  ORIGINAL_ARCHIVED: '原包移入归档区',
+  ORIGINAL_DELETED: '已清理原包',
+  ARCHIVE_MOVE_WARN: '原包归档提醒',
   AUTO_LOCAL_FALLBACK: '自动切换本地',
   WAITING_APPROVAL: '待确认本地兜底',
   LOCAL_FALLBACK_APPROVED: '已确认本地兜底',
@@ -62,6 +68,7 @@ const EVENT_KIND_ZH = {
   LIFE_MONITOR_CHECK: '生活事件检查',
   BARK_WINDOW_FIRED: 'Bark 窗口触发',
   CACHE_RECLAIMED: '缓存回收',
+  DATE_ORGANIZED: '日期目录整理',
   RETRIED: '重新入队',
   SUCCEEDED: '处理成功',
   FAILED: '处理失败',
@@ -208,9 +215,9 @@ function switchTab(tab) {
   document.getElementById('page-title').textContent = TAB_TITLES[tab] || 'Ark 方舟';
 
   if (tab === 'tasks') loadPipelines();
-  if (tab === 'sources') { loadSources(); loadSeedRule(); }
+  if (tab === 'sources') { loadSources(); loadArchiveRule(); loadSeedRule(); }
   if (tab === 'logs') loadLogs();
-  if (tab === 'settings') { loadP115(); loadTelegram(); loadWebhook(); loadPasswords(); loadTokens(); refreshTelemetry(true); }
+  if (tab === 'settings') { loadP115(); loadTelegram(); loadWebhook(); loadPasswords(); loadTokens(); loadOrganizerConfig(); refreshTelemetry(true); }
 }
 
 function switchSubTab(viewName, paneId, btn) {
@@ -219,6 +226,8 @@ function switchSubTab(viewName, paneId, btn) {
   view.querySelectorAll('.sub-pane').forEach((p) => p.classList.toggle('active', p.id === paneId));
   view.querySelectorAll('.sub-tab').forEach((b) => b.classList.toggle('active', b === btn || b.dataset.sub === paneId));
   if (paneId === 'set-status') { refreshTelemetry(true); loadMaintenance(); }
+  if (paneId === 'set-organize') loadOrganizerConfig();
+  if (paneId === 'archive-rule-pane') loadArchiveRule();
 }
 
 function openSettingsStatus() {
@@ -594,6 +603,19 @@ async function deletePipe(id) {
   else showAlert('tasks-alert', '运行中或提交结果待核对的任务禁止删除');
   loadPipelines();
 }
+async function triggerCloudScan(btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/monitor/cloud-scan', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`115 云监控目录扫描完成，新接管 ${d.adopted ?? 0} 个压缩包`);
+      loadPipelines();
+    } else {
+      showAlert('tasks-alert', zhError(d.error?.code, d.error?.message));
+    }
+  } finally { btn.disabled = false; }
+}
 async function triggerLocalScan(btn) {
   btn.disabled = true;
   try {
@@ -692,7 +714,31 @@ async function loadSources() {
       <td>${s.bark_prefix ? `<code>${esc(s.bark_prefix)}</code>` : '<span class="field-help">未配置</span>'}</td>
       <td style="text-align:right;"><button type="button" class="btn btn-danger btn-sm" onclick="delSource('${s.id}')">删除</button></td>
     </tr>
-  `).join('') : '<tr><td colspan="5" class="field-help">暂无自定义来源（系统默认自动监控工作目录下的 watch 文件夹）</td></tr>';
+  `).join('') : '<tr><td colspan="5" class="field-help">暂无自定义来源（系统默认自动监控工作目录下的「本地监控」文件夹）</td></tr>';
+}
+
+async function loadArchiveRule() {
+  try {
+    const d = await fetch('/api/v1/settings/archive-rule').then((r) => r.json());
+    if (document.getElementById('ar-orig')) document.getElementById('ar-orig').value = d.original_action || 'archive';
+    if (document.getElementById('ar-fail')) document.getElementById('ar-fail').value = d.cloud_failure_action || 'confirm_local';
+  } catch {}
+}
+
+async function saveArchiveRule(btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/settings/archive-rule', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        original_action: document.getElementById('ar-orig').value,
+        cloud_failure_action: document.getElementById('ar-fail').value,
+      }),
+    });
+    if (r.ok) showToast('解压与归档规则已保存');
+    else showToast('规则保存失败');
+  } finally { btn.disabled = false; }
 }
 
 async function addSource(btn) {
@@ -797,7 +843,7 @@ async function loadLogs() {
       <td><strong>${esc(b.title || '无标题')}</strong></td>
       <td style="white-space:pre-line;">${esc(b.body || '-')}</td>
       <td>${b.matched_source_id ? `<span class="badge badge-ok">${esc(srcName[b.matched_source_id] || '已匹配云目录')}</span>` : '<span class="badge badge-muted">未命中前缀</span>'}</td>
-      <td><span class="badge badge-info">已进入 90 秒合并窗口</span></td>
+      <td>${b.status === 'dispatched' ? '<span class="badge badge-ok">已触发云扫描</span>' : '<span class="badge badge-info">90 秒窗口合并中</span>'}</td>
     </tr>
   `).join('') : '<tr><td colspan="5" class="field-help">尚未收到 Bark 联动信号</td></tr>';
 }
@@ -805,12 +851,11 @@ async function loadLogs() {
 /* Settings */
 async function loadP115() {
   const d = await fetch('/api/v1/settings/p115').then((r) => r.json());
-  document.getElementById('p115-by-date').checked = d.cloud_extract_by_date !== false;
   document.getElementById('p115-life').checked = !!d.life_monitor_enabled;
   document.getElementById('p115-root').value = d.cloud_root_cid || '';
   document.getElementById('p115-status').innerHTML = `
     <span class="badge ${d.has_cookie ? 'badge-ok' : 'badge-warn'}">${d.has_cookie ? '已保存加密凭据' : '未配置凭据'}</span>
-    <span class="field-help">离线=${esc(d.offline_root_cid || '未设')} · 解压=${esc(d.cloud_output_cid || '未设')} · 归档=${esc(d.cloud_archive_cid || '未设')} · 失败=${esc(d.cloud_failed_cid || '未设')}</span>`;
+    <span class="field-help">离线下载=${esc(d.offline_root_cid || '未设')} · 解压输出=${esc(d.cloud_output_cid || '未设')} · 归档区=${esc(d.cloud_archive_zone_cid || d.cloud_archive_cid || '未设')}</span>`;
 }
 async function saveP115(btn) {
   hideAlert('p115-alert');
@@ -821,7 +866,6 @@ async function saveP115(btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         cookie: document.getElementById('p115-cookie').value.trim(),
-        cloud_extract_by_date: document.getElementById('p115-by-date').checked,
         life_monitor_enabled: document.getElementById('p115-life').checked,
       }),
     });
@@ -844,7 +888,7 @@ async function initCloudRoot(btn) {
     });
     const d = await r.json();
     if (!r.ok) return showAlert('p115-alert', zhError(d.error?.code, d.error?.message));
-    showToast('已自动初始化离线、解压、归档、失败 4 个云目录');
+    showToast('已初始化「离线下载 / 解压输出 / 归档区（原包留存、异常待查、历史归档）」');
     loadP115();
   } finally { btn.disabled = false; }
 }
@@ -977,6 +1021,87 @@ async function delToken(id) {
   await fetch('/api/v1/tokens/' + encodeURIComponent(id), { method: 'DELETE' });
   showToast('接口令牌已撤销');
   loadTokens();
+}
+
+/* Date-Folder Organizer */
+function toggleRetentionDays() {
+  const mode = document.getElementById('org-mode')?.value || 'current_month';
+  const wrap = document.getElementById('org-days-wrap');
+  if (wrap) wrap.style.display = mode === 'days' ? 'flex' : 'none';
+}
+
+async function loadOrganizerConfig() {
+  try {
+    const d = await fetch('/api/v1/organizer/config').then((r) => r.json());
+    if (!document.getElementById('org-mode')) return;
+    document.getElementById('org-mode').value = d.retention_mode || 'current_month';
+    document.getElementById('org-days').value = d.retention_days || 14;
+    document.getElementById('org-cloud').checked = d.include_cloud !== false;
+    document.getElementById('org-local').checked = d.include_local !== false;
+    document.getElementById('org-empty').checked = d.clean_empty !== false;
+    document.getElementById('org-auto').checked = !!d.auto_enabled;
+    toggleRetentionDays();
+  } catch {}
+}
+
+async function saveOrganizerConfig(btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        retention_mode: document.getElementById('org-mode').value,
+        retention_days: Math.max(1, Number(document.getElementById('org-days').value) || 14),
+        include_cloud: document.getElementById('org-cloud').checked,
+        include_local: document.getElementById('org-local').checked,
+        clean_empty: document.getElementById('org-empty').checked,
+        auto_enabled: document.getElementById('org-auto').checked,
+      }),
+    });
+    if (r.ok) showToast('日期目录整理策略已保存');
+    else showToast('整理策略保存失败');
+  } finally { btn.disabled = false; }
+}
+
+async function previewOrganize(btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/preview', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) return showToast('扫描预览失败');
+    const wrap = document.getElementById('org-preview-wrap');
+    const summary = document.getElementById('org-preview-summary');
+    const tbody = document.getElementById('org-preview-list');
+    wrap.style.display = 'block';
+    const items = d.actions || [];
+    summary.textContent = `扫描完成：待归并 ${d.move_count || 0} 个旧日期目录，待清理空目录 ${d.empty_count || 0} 个`
+      + (d.skipped_active ? `（已自动跳过 ${d.skipped_active} 个进行中任务目录）` : '');
+    tbody.innerHTML = items.length ? items.map((a) => `
+      <tr>
+        <td><span class="badge ${a.scope === 'cloud' ? 'badge-ok' : 'badge-info'}">${a.scope === 'cloud' ? '115 云端' : '本地 NAS'}</span></td>
+        <td>${esc(a.category)}</td>
+        <td class="mono-num"><strong>${esc(a.date)}</strong></td>
+        <td><span class="badge ${a.action === 'delete_empty' ? 'badge-warn' : 'badge-muted'}">${a.action === 'delete_empty' ? '清理空壳' : '折叠归档'}</span></td>
+        <td><code>${esc(a.target_path)}</code></td>
+      </tr>
+    `).join('') : '<tr><td colspan="5" class="field-help">当前没有超过保留期的旧日期目录需要整理</td></tr>';
+  } finally { btn.disabled = false; }
+}
+
+async function runOrganize(btn) {
+  if (!confirm('确认将超过保留期的旧日期目录归并到「归档区/历史归档」，并按策略清理空目录？（进行中任务目录会自动跳过）')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/run', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`整理完成：归并 ${d.moved_count || 0} 个，清理空目录 ${d.deleted_empty || 0} 个`);
+      previewOrganize({ disabled: false });
+    } else {
+      showToast('执行整理失败');
+    }
+  } finally { btn.disabled = false; }
 }
 
 /* Maintenance, Clear & Cache Reclaim */

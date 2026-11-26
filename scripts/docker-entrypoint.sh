@@ -23,9 +23,21 @@ if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
   mkdir -p "$DATA_DIR"
   chown -R "${TARGET_UID}:${TARGET_GID}" "$DATA_DIR" 2>/dev/null || true
   if [ -n "$WORK_DIR" ]; then
-    mkdir -p "$WORK_DIR" "$WORK_DIR/watch" "$WORK_DIR/output" "$WORK_DIR/cache" "$WORK_DIR/archive"
+    mkdir -p "$WORK_DIR" \
+      "$WORK_DIR/本地监控" \
+      "$WORK_DIR/解压输出" \
+      "$WORK_DIR/归档区" \
+      "$WORK_DIR/归档区/原包留存" \
+      "$WORK_DIR/归档区/下载缓存" \
+      "$WORK_DIR/归档区/历史归档"
     chown "${TARGET_UID}:${TARGET_GID}" \
-      "$WORK_DIR" "$WORK_DIR/watch" "$WORK_DIR/output" "$WORK_DIR/cache" "$WORK_DIR/archive" 2>/dev/null || true
+      "$WORK_DIR" \
+      "$WORK_DIR/本地监控" \
+      "$WORK_DIR/解压输出" \
+      "$WORK_DIR/归档区" \
+      "$WORK_DIR/归档区/原包留存" \
+      "$WORK_DIR/归档区/下载缓存" \
+      "$WORK_DIR/归档区/历史归档" 2>/dev/null || true
   fi
   exec su-exec "${TARGET_UID}:${TARGET_GID}" /usr/local/bin/ark "$@"
 fi

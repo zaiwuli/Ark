@@ -383,15 +383,24 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 		return Pipeline{}, ErrPipelineBusy
 	}
 	now := time.Now().Unix()
-	if p.State == "seed_cleanup_failed" {
+	switch {
+	case p.State == "seed_cleanup_failed":
 		p.State = "seed_cleanup"
 		p.Stage = "seed_cleanup"
-	} else {
+	case p.Kind == "local_archive":
+		p.State = "local_extract"
+		p.Stage = "local_extract"
+	case p.Kind == "cloud_archive":
+		p.State = "cloud_prepare"
+		p.Stage = "cloud_prepare"
+	default:
 		p.State = "queued"
 		p.Stage = "offline_submit"
 	}
+	p.Attempts = 0
 	p.ErrorCode = ""
 	p.ErrorMessage = ""
+	p.WaitReason = ""
 	p.NextRunAt = now
 	p.CompletedAt = nil
 	if err := s.UpdatePipeline(ctx, p); err != nil {
@@ -407,7 +416,8 @@ func (s *Store) DeletePipeline(ctx context.Context, id string) error {
 		return err
 	}
 	switch p.State {
-	case "submitting", "submission_unknown", "running", "extracting", "caching", "reconciling":
+	case "submitting", "submission_unknown", "running", "extracting", "caching", "reconciling",
+		"local_extract", "cloud_prepare", "cloud_inspect", "cloud_export", "cloud_progress", "seed_cleanup":
 		return ErrPipelineBusy
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM pipelines WHERE id = ?`, id)
@@ -499,6 +509,7 @@ type LocalArchiveInput struct {
 	Identity    string
 	SourceID    string
 	Name        string
+	TargetDate  string
 	Size        int64
 	LocatorJSON string
 	PolicyJSON  string
@@ -510,11 +521,11 @@ func (s *Store) CreateLocalArchivePipeline(ctx context.Context, in LocalArchiveI
 	id := NewID("pl")
 	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO pipelines(
-			id, kind, identity, source_id, name, size,
+			id, kind, identity, source_id, name, size, target_date,
 			state, stage, auto_extract, next_run_at,
 			locator_json, policy_json, created_at, updated_at
-		) VALUES(?, 'local_archive', ?, ?, ?, ?, 'local_extract', 'local_extract', 1, ?, ?, ?, ?, ?)
-	`, id, in.Identity, in.SourceID, in.Name, in.Size, now, in.LocatorJSON, in.PolicyJSON, now, now)
+		) VALUES(?, 'local_archive', ?, ?, ?, ?, ?, 'local_extract', 'local_extract', 1, ?, ?, ?, ?, ?)
+	`, id, in.Identity, in.SourceID, in.Name, in.Size, in.TargetDate, now, in.LocatorJSON, in.PolicyJSON, now, now)
 	if err != nil {
 		return false, err
 	}

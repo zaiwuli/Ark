@@ -102,6 +102,7 @@
               <button type="button" class="sub-tab" data-task-kind="offline" onclick="setTaskKind('offline', this)">离线任务</button>
             </div>
             <div class="toolbar">
+              <button type="button" class="btn btn-secondary btn-sm" onclick="triggerCloudScan(this)">扫描云目录</button>
               <button type="button" class="btn btn-secondary btn-sm" onclick="triggerLocalScan(this)">扫描本地目录</button>
               <button type="button" class="btn btn-secondary btn-sm" onclick="triggerLifeCheck(this)">检查生活事件</button>
             </div>
@@ -237,6 +238,7 @@
         <section id="view-sources" class="view">
           <div class="sub-tabs" role="tablist" aria-label="来源与规则分页">
             <button type="button" class="sub-tab active" data-sub="src-list-pane" onclick="switchSubTab('sources', 'src-list-pane', this)">监控来源</button>
+            <button type="button" class="sub-tab" data-sub="archive-rule-pane" onclick="switchSubTab('sources', 'archive-rule-pane', this)">解压与归档规则</button>
             <button type="button" class="sub-tab" data-sub="seed-rule-pane" onclick="switchSubTab('sources', 'seed-rule-pane', this)">种子清理规则</button>
           </div>
 
@@ -267,7 +269,7 @@
                   </div>
                   <div class="field">
                     <label for="src-target">目录路径 或 云目录编号</label>
-                    <input id="src-target" type="text" placeholder="本地填如 /data/watch，云端填 CID 数字" />
+                    <input id="src-target" type="text" placeholder="本地填如 /data/本地监控，云端填 CID 数字" />
                   </div>
                   <div class="field">
                     <label for="src-bark">Bark 定向路径前缀（云来源可选）</label>
@@ -283,6 +285,42 @@
                     <tbody id="src-list"></tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="archive-rule-pane" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+                  <span>解压与归档规则</span>
+                </h2>
+                <span class="field-help">云端与本地解压统一按 YYYY-MM-DD 自动分层输出，云解压失败自动重试 1 次</span>
+              </div>
+              <div class="panel-body">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="ar-orig">解压成功后原压缩包处理</label>
+                    <select id="ar-orig">
+                      <option value="archive">移入「归档区/原包留存/日期」（推荐）</option>
+                      <option value="keep">保留在原目录不动</option>
+                      <option value="delete">解压成功后直接删除原压缩包</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="ar-fail">云解压自动重试 1 次仍失败时</label>
+                    <select id="ar-fail">
+                      <option value="confirm_local">等待手动确认是否下载到本地 7-Zip 兜底（推荐）</option>
+                      <option value="auto_local">自动直链缓存到本地 7-Zip 解压</option>
+                      <option value="move_failed">直接移入「归档区/异常待查」并通知</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:16px;">
+                  <button type="button" class="btn btn-primary" onclick="saveArchiveRule(this)">保存解压规则</button>
+                </div>
+                <div class="field-help" style="margin-top:10px;">说明：规则同时作用于离线自动发现的压缩包、115 云监控目录以及本地 NAS 监控目录。</div>
               </div>
             </div>
           </div>
@@ -391,6 +429,7 @@
             <button type="button" class="sub-tab" data-sub="set-webhook" onclick="switchSubTab('settings', 'set-webhook', this)">通用通知回调</button>
             <button type="button" class="sub-tab" data-sub="set-pwds" onclick="switchSubTab('settings', 'set-pwds', this)">压缩包密码本</button>
             <button type="button" class="sub-tab" data-sub="set-tokens" onclick="switchSubTab('settings', 'set-tokens', this)">令牌与外部接入</button>
+            <button type="button" class="sub-tab" data-sub="set-organize" onclick="switchSubTab('settings', 'set-organize', this)">日期目录整理</button>
             <button type="button" class="sub-tab" data-sub="set-status" onclick="switchSubTab('settings', 'set-status', this)">运行状态与维护</button>
           </div>
 
@@ -415,17 +454,17 @@
                   </div>
                   <div class="field">
                     <label for="p115-root">云根目录编号（CID）</label>
-                    <input id="p115-root" type="text" placeholder="一键自动创建离线、解压、归档、失败 4 个目录" />
+                    <input id="p115-root" type="text" placeholder="一键创建「离线下载 / 解压输出 / 归档区」3 个目录" />
                   </div>
-                  <div class="field" style="justify-content:flex-end;gap:10px;">
-                    <label class="check-label"><input id="p115-by-date" type="checkbox" checked /> 云解压输出按日期分层（YYYY-MM-DD）</label>
+                  <div class="field" style="justify-content:flex-end;">
                     <label class="check-label"><input id="p115-life" type="checkbox" /> 启用 30 分钟生活事件增量监测</label>
                   </div>
                 </div>
                 <div class="toolbar" style="margin-top:16px;">
                   <button type="button" class="btn btn-primary" onclick="saveP115(this)">保存连接</button>
-                  <button type="button" class="btn btn-secondary" onclick="initCloudRoot(this)">一键初始化云根目录</button>
+                  <button type="button" class="btn btn-secondary" onclick="initCloudRoot(this)">一键初始化 3 目录结构</button>
                 </div>
+                <div class="field-help" style="margin-top:10px;">云根目录外层仅建 3 个文件夹：离线下载、解压输出、归档区（内含 原包留存 / 异常待查 / 历史归档）。所有日期目录默认按 YYYY-MM-DD 自动分层。</div>
               </div>
             </div>
           </div>
@@ -596,6 +635,53 @@
                     <li><strong>Bark 联动</strong>：发送端 Bark 服务器填「Bark 地址」，设备 Key 填操作权限令牌，并在「来源与规则」中配置云目录路径前缀。</li>
                   </ol>
                 </details>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-organize" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" x2="12" y1="11" y2="17"/><line x1="9" x2="15" y1="14" y2="14"/></svg>
+                  <span>日期目录长期整理（归档区 / 历史归档）</span>
+                </h2>
+                <span class="field-help">旧日期目录一步折叠进「归档区/历史归档/分类/YYYY年/YYYY-MM/」</span>
+              </div>
+              <div class="panel-body">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="org-mode">热数据保留方式</label>
+                    <select id="org-mode" onchange="toggleRetentionDays()">
+                      <option value="current_month">保留当月全部（收拢上月及更早日期，推荐）</option>
+                      <option value="days">保留最近 N 天不动</option>
+                    </select>
+                  </div>
+                  <div class="field" id="org-days-wrap" style="display:none;">
+                    <label for="org-days">保留天数（天）</label>
+                    <input id="org-days" type="number" min="1" max="365" value="14" />
+                  </div>
+                </div>
+                <div class="toggle-row" style="margin-top:14px;">
+                  <label class="check-label"><input id="org-cloud" type="checkbox" checked /> 整理 115 云端目录（离线下载 / 解压输出 / 原包留存）</label>
+                  <label class="check-label"><input id="org-local" type="checkbox" checked /> 整理本地 NAS 目录（解压输出 / 原包留存）</label>
+                  <label class="check-label"><input id="org-empty" type="checkbox" checked /> 顺手清理超过保留期的空日期目录</label>
+                  <label class="check-label"><input id="org-auto" type="checkbox" /> 启用定期自动整理（后台静默归并并推送汇总）</label>
+                </div>
+                <div class="toolbar" style="margin-top:16px;">
+                  <button type="button" class="btn btn-primary" onclick="saveOrganizerConfig(this)">保存整理策略</button>
+                  <button type="button" class="btn btn-secondary" onclick="previewOrganize(this)">扫描预览待整理目录</button>
+                  <button type="button" class="btn btn-warn" onclick="runOrganize(this)">立即执行整理</button>
+                </div>
+                <div id="org-preview-wrap" style="display:none;margin-top:16px;">
+                  <div id="org-preview-summary" class="field-help" style="margin-bottom:8px;"></div>
+                  <div class="table-wrap">
+                    <table>
+                      <thead><tr><th>位置</th><th>分类</th><th>日期目录</th><th>操作</th><th>目标路径</th></tr></thead>
+                      <tbody id="org-preview-list"></tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

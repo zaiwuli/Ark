@@ -26,15 +26,16 @@ type Incoming struct {
 type Receiver struct {
 	store     *store.Store
 	windowDur time.Duration
-	onTrigger func(ctx context.Context)
+	onTrigger func(ctx context.Context, sourceIDs []string)
 
 	mu            sync.Mutex
 	activeWinID   string
 	activeCount   int
+	activeSources map[string]bool
 	windowTimer   *time.Timer
 }
 
-func NewReceiver(st *store.Store, windowDur time.Duration, onTrigger func(ctx context.Context)) *Receiver {
+func NewReceiver(st *store.Store, windowDur time.Duration, onTrigger func(ctx context.Context, sourceIDs []string)) *Receiver {
 	if windowDur <= 0 {
 		windowDur = DefaultWindowDuration
 	}
@@ -65,12 +66,19 @@ func (r *Receiver) Ingest(ctx context.Context, in Incoming) (store.BarkMessage, 
 	if r.activeWinID == "" {
 		r.activeWinID = store.NewID("bwin")
 		r.activeCount = 1
+		r.activeSources = make(map[string]bool)
 		winID := r.activeWinID
 		r.windowTimer = time.AfterFunc(r.windowDur, func() {
 			r.fireWindow(winID)
 		})
 	} else {
 		r.activeCount++
+	}
+	if matchedSourceID != "" {
+		if r.activeSources == nil {
+			r.activeSources = make(map[string]bool)
+		}
+		r.activeSources[matchedSourceID] = true
 	}
 	winID := r.activeWinID
 	r.mu.Unlock()
@@ -93,18 +101,24 @@ func (r *Receiver) fireWindow(winID string) {
 		return
 	}
 	count := r.activeCount
+	sourceIDs := make([]string, 0, len(r.activeSources))
+	for id := range r.activeSources {
+		sourceIDs = append(sourceIDs, id)
+	}
 	r.activeWinID = ""
 	r.activeCount = 0
+	r.activeSources = nil
 	r.windowTimer = nil
 	cb := r.onTrigger
 	r.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	_ = r.store.MarkBarkWindowDispatched(ctx, winID)
 	_ = r.store.RecordEvent(ctx, "system", "BARK_WINDOW_FIRED", "bark",
 		"Bark 90 秒合并窗口到期，触发云端变化检查（合并信号 "+itoa(count)+" 条）", false)
 	if cb != nil {
-		cb(ctx)
+		cb(ctx, sourceIDs)
 	}
 }
 

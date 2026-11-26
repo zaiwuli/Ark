@@ -112,6 +112,34 @@ func (s *Store) ActiveCachePipelineIDs(ctx context.Context) (map[string]bool, er
 	return active, rows.Err()
 }
 
+// ActiveDatesAndCIDs returns target_date and target_cid sets referenced by non-terminal pipelines
+// so the date-folder organizer never moves a folder still in active use.
+func (s *Store) ActiveDatesAndCIDs(ctx context.Context) (dates map[string]bool, cids map[string]bool, err error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT target_date, target_cid
+		FROM pipelines
+		WHERE state NOT IN ('completed', 'failed', 'submit_failed', 'seed_cleanup_failed')
+	`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	dates = make(map[string]bool)
+	cids = make(map[string]bool)
+	for rows.Next() {
+		var d, c string
+		if err := rows.Scan(&d, &c); err == nil {
+			if d != "" {
+				dates[d] = true
+			}
+			if c != "" {
+				cids[c] = true
+			}
+		}
+	}
+	return dates, cids, rows.Err()
+}
+
 func (s *Store) ClearEvents(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM task_events`)
 	if err != nil {

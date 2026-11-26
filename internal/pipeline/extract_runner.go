@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zaiwuli/Ark/internal/config"
 	"github.com/zaiwuli/Ark/internal/extract"
 	"github.com/zaiwuli/Ark/internal/localwatch"
 	"github.com/zaiwuli/Ark/internal/p115"
@@ -19,23 +20,79 @@ import (
 )
 
 type CloudLocator struct {
-	FID       string `json:"fid"`
-	CID       string `json:"cid"`
-	Pickcode  string `json:"pickcode"`
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	SHA1      string `json:"sha1"`
-	CachePath string `json:"cache_path,omitempty"`
+	FID          string `json:"fid"`
+	CID          string `json:"cid"`
+	Pickcode     string `json:"pickcode"`
+	Name         string `json:"name"`
+	Size         int64  `json:"size"`
+	SHA1         string `json:"sha1"`
+	CachePath    string `json:"cache_path,omitempty"`
+	CloudRetries int    `json:"cloud_retries,omitempty"`
 }
 
+// ArchiveRuleConfig governs post-extraction original handling and cloud failure policy.
+// Date layering (YYYY-MM-DD) and single-root squashing are always enabled by default.
 type ArchiveRuleConfig struct {
-	AutoFallback     bool   `json:"auto_fallback"`
-	SquashRoot       bool   `json:"squash_root"`
-	DisableRecursion bool   `json:"disable_recursion"`
-	OutputDateDir    bool   `json:"output_date_dir"`
+	OriginalAction     string `json:"original_action"`      // archive (default) | keep | delete
+	CloudFailureAction string `json:"cloud_failure_action"` // confirm_local (default) | auto_local | move_failed
+	// Legacy/per-pipeline fields retained for backward compatibility:
+	AutoFallback     bool   `json:"auto_fallback,omitempty"`
+	SquashRoot       bool   `json:"squash_root,omitempty"`
+	DisableRecursion bool   `json:"disable_recursion,omitempty"`
+	OutputDateDir    bool   `json:"output_date_dir,omitempty"`
 	OutputCID        string `json:"output_cid,omitempty"`
 	OutputDir        string `json:"output_dir,omitempty"`
-	DeleteOriginal   bool   `json:"delete_original"`
+	DeleteOriginal   bool   `json:"delete_original,omitempty"`
+}
+
+func DefaultArchiveRule() ArchiveRuleConfig {
+	return ArchiveRuleConfig{
+		OriginalAction:     "archive",
+		CloudFailureAction: "confirm_local",
+		SquashRoot:         true,
+		DisableRecursion:   true,
+		OutputDateDir:      true,
+	}
+}
+
+func (r ArchiveRuleConfig) Normalize() ArchiveRuleConfig {
+	out := r
+	switch out.OriginalAction {
+	case "archive", "keep", "delete":
+	default:
+		if out.DeleteOriginal {
+			out.OriginalAction = "delete"
+		} else {
+			out.OriginalAction = "archive"
+		}
+	}
+	switch out.CloudFailureAction {
+	case "confirm_local", "auto_local", "move_failed":
+	default:
+		if out.AutoFallback {
+			out.CloudFailureAction = "auto_local"
+		} else {
+			out.CloudFailureAction = "confirm_local"
+		}
+	}
+	out.SquashRoot = true
+	out.DisableRecursion = true
+	out.OutputDateDir = true
+	return out
+}
+
+func (s *Service) ArchiveRule(ctx context.Context) ArchiveRuleConfig {
+	rule := DefaultArchiveRule()
+	_, _ = s.store.GetSetting(ctx, "extract.rule", &rule)
+	return rule.Normalize()
+}
+
+func (s *Service) SaveArchiveRule(ctx context.Context, incoming ArchiveRuleConfig) (ArchiveRuleConfig, error) {
+	norm := incoming.Normalize()
+	if err := s.store.SetSetting(ctx, "extract.rule", norm, false); err != nil {
+		return ArchiveRuleConfig{}, err
+	}
+	return norm, nil
 }
 
 func (s *Service) ArchivePasswords(ctx context.Context) []string {
@@ -80,6 +137,103 @@ func (s *Service) ConfirmLocalFallback(ctx context.Context, pipelineID string) (
 	return p, nil
 }
 
+func listAllCloudFiles(ctx context.Context, cloud p115.Port, cid string) ([]p115.CloudFile, error) {
+	var all []p115.CloudFile
+	offset := 0
+	for range 20 {
+		page, err := cloud.Files(ctx, cid, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Files...)
+		if page.NextOffset == nil {
+			break
+		}
+		offset = *page.NextOffset
+	}
+	return all, nil
+}
+
+func (s *Service) adoptCloudArchive(ctx context.Context, parentID, sourceID string, f p115.CloudFile, targetDate string, cfg P115Settings, rule ArchiveRuleConfig) bool {
+	if targetDate == "" {
+		targetDate = time.Now().In(s.loc).Format("2006-01-02")
+	}
+	locBytes, _ := json.Marshal(CloudLocator{
+		FID: f.FID, CID: f.CID, Pickcode: f.Pickcode, Name: f.Name, Size: f.Size, SHA1: f.SHA1,
+	})
+	pol := rule.Normalize()
+	if pol.OutputCID == "" {
+		pol.OutputCID = cfg.CloudOutputCID
+	}
+	polBytes, _ := json.Marshal(pol)
+	ident := fmt.Sprintf("cloud:%s:%d", f.FID, f.Size)
+	_, created, err := s.store.CreateCloudArchivePipeline(ctx, parentID, sourceID, ident, f.Name, targetDate, f.Size, string(locBytes), string(polBytes))
+	return err == nil && created
+}
+
+// ScanCloudSources scans enabled 115 cloud watch sources (optionally restricted to onlySourceIDs)
+// and enqueues newly discovered primary archive files into cloud_archive pipelines.
+func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) (int, error) {
+	cloud, cfg := s.snapshotCloud()
+	if cloud == nil {
+		return 0, ErrP115NotConfigured
+	}
+	sources, err := s.store.ListSources(ctx, "cloud")
+	if err != nil {
+		return 0, err
+	}
+	filterSet := make(map[string]bool, len(onlySourceIDs))
+	for _, id := range onlySourceIDs {
+		if id != "" {
+			filterSet[id] = true
+		}
+	}
+
+	s.lastCloudScan = time.Now().Unix()
+	rule := s.ArchiveRule(ctx)
+	today := time.Now().In(s.loc).Format("2006-01-02")
+	adopted := 0
+	scanned := 0
+
+	for _, src := range sources {
+		if !src.Enabled {
+			continue
+		}
+		if len(filterSet) > 0 && !filterSet[src.ID] {
+			continue
+		}
+		var sc struct {
+			CID string `json:"cid"`
+		}
+		if err := json.Unmarshal([]byte(src.ConfigJSON), &sc); err != nil || strings.TrimSpace(sc.CID) == "" {
+			continue
+		}
+		srcCID := strings.TrimSpace(sc.CID)
+		files, err := listAllCloudFiles(ctx, cloud, srcCID)
+		if err != nil {
+			continue
+		}
+		scanned++
+		for _, f := range files {
+			if f.IsDir {
+				continue
+			}
+			if !extract.IsPrimaryArchiveName(f.Name) {
+				continue
+			}
+			if s.adoptCloudArchive(ctx, "", src.ID, f, today, cfg, rule) {
+				adopted++
+			}
+		}
+	}
+
+	if adopted > 0 {
+		_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
+			fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), false)
+	}
+	return adopted, nil
+}
+
 // discoverOfflineArchives scans TargetCID for completed offline tasks and adopts archive files into cloud_archive pipelines.
 func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, cfg P115Settings) error {
 	now := time.Now().Unix()
@@ -87,12 +241,13 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 	if err != nil || len(due) == 0 {
 		return err
 	}
+	rule := s.ArchiveRule(ctx)
 
 	for _, p := range due {
 		if p.TargetCID == "" {
 			continue
 		}
-		page, err := cloud.Files(ctx, p.TargetCID, 0)
+		files, err := listAllCloudFiles(ctx, cloud, p.TargetCID)
 		if err != nil {
 			p.NextRunAt = now + 60
 			_ = s.store.UpdatePipeline(ctx, p)
@@ -100,13 +255,13 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 		}
 
 		var candidates []p115.CloudFile
-		for _, f := range page.Files {
-			if !f.IsDir && extract.IsArchiveExt(f.Name) {
+		for _, f := range files {
+			if !f.IsDir && extract.IsPrimaryArchiveName(f.Name) {
 				candidates = append(candidates, f)
 			} else if f.IsDir && strings.EqualFold(f.Name, p.Name) {
-				if sub, subErr := cloud.Files(ctx, f.FID, 0); subErr == nil {
-					for _, sf := range sub.Files {
-						if !sf.IsDir && extract.IsArchiveExt(sf.Name) {
+				if sub, subErr := listAllCloudFiles(ctx, cloud, f.FID); subErr == nil {
+					for _, sf := range sub {
+						if !sf.IsDir && extract.IsPrimaryArchiveName(sf.Name) {
 							candidates = append(candidates, sf)
 						}
 					}
@@ -116,21 +271,7 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 
 		adopted := 0
 		for _, f := range candidates {
-			locBytes, _ := json.Marshal(CloudLocator{
-				FID: f.FID, CID: f.CID, Pickcode: f.Pickcode, Name: f.Name, Size: f.Size, SHA1: f.SHA1,
-			})
-			polBytes, _ := json.Marshal(ArchiveRuleConfig{
-				SquashRoot:       true,
-				DisableRecursion: true,
-				OutputDateDir:    cfg.ExtractByDateEnabled(),
-				OutputCID:        cfg.CloudOutputCID,
-			})
-			targetDate := p.TargetDate
-			if targetDate == "" {
-				targetDate = time.Now().In(s.loc).Format("2006-01-02")
-			}
-			ident := fmt.Sprintf("cloud:%s:%d", f.FID, f.Size)
-			if _, created, err := s.store.CreateCloudArchivePipeline(ctx, p.ID, "", ident, f.Name, targetDate, f.Size, string(locBytes), string(polBytes)); err == nil && created {
+			if s.adoptCloudArchive(ctx, p.ID, "", f, p.TargetDate, cfg, rule) {
 				adopted++
 			}
 		}
@@ -169,12 +310,32 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 		return err
 	}
 	passwords := s.ArchivePasswords(ctx)
+	globalRule := s.ArchiveRule(ctx)
 
 	for _, p := range due {
 		var loc CloudLocator
 		_ = json.Unmarshal([]byte(p.LocatorJSON), &loc)
-		var rule ArchiveRuleConfig
-		_ = json.Unmarshal([]byte(p.PolicyJSON), &rule)
+		rule := globalRule
+		if strings.TrimSpace(p.PolicyJSON) != "" && p.PolicyJSON != "{}" {
+			var perPipe ArchiveRuleConfig
+			if json.Unmarshal([]byte(p.PolicyJSON), &perPipe) == nil {
+				if perPipe.OriginalAction != "" {
+					rule.OriginalAction = perPipe.OriginalAction
+				}
+				if perPipe.CloudFailureAction != "" {
+					rule.CloudFailureAction = perPipe.CloudFailureAction
+				} else if perPipe.AutoFallback {
+					rule.CloudFailureAction = "auto_local"
+				}
+				if perPipe.OutputCID != "" {
+					rule.OutputCID = perPipe.OutputCID
+				}
+				if perPipe.OutputDir != "" {
+					rule.OutputDir = perPipe.OutputDir
+				}
+			}
+		}
+		rule = rule.Normalize()
 
 		switch p.State {
 		case "cloud_prepare":
@@ -184,7 +345,7 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 			}
 			st, err := cloud.PrepareExtract(ctx, loc.Pickcode, pwd)
 			if err != nil {
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_PREPARE_FAILED", err.Error())
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_PREPARE_FAILED", err.Error(), true)
 				continue
 			}
 			switch st {
@@ -197,11 +358,11 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 					p.Attempts++
 					p.NextRunAt = now + 2
 				} else {
-					s.failCloudToFallback(ctx, p, rule, "CLOUD_PASSWORD_FAILED", "云解压密码不匹配")
+					s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_PASSWORD_FAILED", "云解压密码不匹配", false)
 					continue
 				}
 			case "failed":
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_PREPARE_FAILED", "115 云解压预检失败")
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_PREPARE_FAILED", "115 云解压预检失败", true)
 				continue
 			default:
 				p.State = "cloud_inspect"
@@ -229,11 +390,11 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 					p.Stage = "cloud_prepare"
 					p.NextRunAt = now + 2
 				} else {
-					s.failCloudToFallback(ctx, p, rule, "CLOUD_PASSWORD_FAILED", "云解压需要有效密码")
+					s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_PASSWORD_FAILED", "云解压需要有效密码", false)
 					continue
 				}
 			case "failed":
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_INSPECT_FAILED", "115 云解压分析失败")
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_INSPECT_FAILED", "115 云解压分析失败", true)
 				continue
 			default:
 				p.NextRunAt = now + 8
@@ -248,31 +409,28 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 			if outRoot == "" {
 				outRoot = loc.CID
 			}
-			parentCID := outRoot
-			if rule.OutputDateDir || cfg.ExtractByDateEnabled() {
-				targetDate := p.TargetDate
-				if targetDate == "" {
-					targetDate = time.Now().In(s.loc).Format("2006-01-02")
-				}
-				dateCID, err := s.resolveDateFolder(ctx, cloud, outRoot, targetDate)
-				if err != nil {
-					s.failCloudToFallback(ctx, p, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error())
-					continue
-				}
-				parentCID = dateCID
+			targetDate := p.TargetDate
+			if targetDate == "" {
+				targetDate = time.Now().In(s.loc).Format("2006-01-02")
+				p.TargetDate = targetDate
+			}
+			dateCID, err := s.resolveDateFolder(ctx, cloud, outRoot, targetDate)
+			if err != nil {
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error(), true)
+				continue
 			}
 			folderName := strings.TrimSuffix(loc.Name, filepath.Ext(loc.Name))
 			if folderName == "" {
 				folderName = p.ID
 			}
-			targetCID, err := cloud.EnsureFolder(ctx, parentCID, folderName)
+			targetCID, err := cloud.EnsureFolder(ctx, dateCID, folderName)
 			if err != nil {
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error())
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_OUTPUT_DIR_FAILED", err.Error(), true)
 				continue
 			}
 			remoteID, err := cloud.StartExtract(ctx, loc.Pickcode, targetCID)
 			if err != nil {
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_EXPORT_FAILED", err.Error())
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_EXPORT_FAILED", err.Error(), true)
 				continue
 			}
 			p.RemoteID = remoteID
@@ -292,16 +450,28 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 			}
 			switch st {
 			case "success":
+				origNote := s.handleCloudOriginalAfterSuccess(ctx, cloud, cfg, p, loc, rule)
 				p.State = "completed"
 				p.Stage = "complete"
+				p.ErrorCode = ""
+				p.ErrorMessage = ""
 				p.CompletedAt = &now
 				p.NextRunAt = 0
-				outBytes, _ := json.Marshal(map[string]any{"engine": "115-cloud", "output_cid": p.TargetCID})
+				outBytes, _ := json.Marshal(map[string]any{
+					"engine":          "115-cloud",
+					"output_cid":      p.TargetCID,
+					"original_action": rule.OriginalAction,
+					"original_note":   origNote,
+				})
 				p.OutputJSON = string(outBytes)
 				_ = s.store.UpdatePipeline(ctx, p)
-				_ = s.store.RecordEvent(ctx, p.ID, "SUCCEEDED", "complete", "115 云解压完成："+p.Name, true)
+				msg := "115 云解压完成：" + p.Name
+				if origNote != "" {
+					msg += "（" + origNote + "）"
+				}
+				_ = s.store.RecordEvent(ctx, p.ID, "SUCCEEDED", "complete", msg, true)
 			case "failed":
-				s.failCloudToFallback(ctx, p, rule, "CLOUD_EXTRACT_FAILED", "115 云解压执行失败")
+				s.handleCloudFailure(ctx, cloud, cfg, p, loc, rule, "CLOUD_EXTRACT_FAILED", "115 云解压执行失败", true)
 			default:
 				p.NextRunAt = now + 8
 				_ = s.store.UpdatePipeline(ctx, p)
@@ -330,9 +500,27 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 	return nil
 }
 
-func (s *Service) failCloudToFallback(ctx context.Context, p store.Pipeline, rule ArchiveRuleConfig, code, msg string) {
+// handleCloudFailure automatically retries 115 cloud extraction once (15s backoff) for non-password errors,
+// then applies the configured failure policy (confirm_local / auto_local / move_failed).
+func (s *Service) handleCloudFailure(ctx context.Context, cloud p115.Port, cfg P115Settings, p store.Pipeline, loc CloudLocator, rule ArchiveRuleConfig, code, msg string, allowRetry bool) {
 	now := time.Now().Unix()
-	if rule.AutoFallback {
+	if allowRetry && loc.CloudRetries < 1 {
+		loc.CloudRetries++
+		locBytes, _ := json.Marshal(loc)
+		p.LocatorJSON = string(locBytes)
+		p.State = "cloud_prepare"
+		p.Stage = "cloud_prepare"
+		p.ErrorCode = code
+		p.ErrorMessage = msg
+		p.NextRunAt = now + 15
+		_ = s.store.UpdatePipeline(ctx, p)
+		_ = s.store.RecordEvent(ctx, p.ID, "CLOUD_EXTRACT_RETRIED", "cloud_prepare",
+			msg+"，15 秒后自动重试（第 1/1 次）", false)
+		return
+	}
+
+	switch rule.CloudFailureAction {
+	case "auto_local":
 		p.State = "caching"
 		p.Stage = "cache"
 		p.NextRunAt = now
@@ -340,16 +528,66 @@ func (s *Service) failCloudToFallback(ctx context.Context, p store.Pipeline, rul
 		p.ErrorMessage = msg
 		_ = s.store.UpdatePipeline(ctx, p)
 		_ = s.store.RecordEvent(ctx, p.ID, "AUTO_LOCAL_FALLBACK", "cache", msg+"，已自动切换本地兜底解压", false)
-		return
+	case "move_failed":
+		note := ""
+		if cloud != nil && cfg.CloudFailedCID != "" && loc.FID != "" {
+			if err := cloud.MoveVerified(ctx, p115.FileLocator{
+				FID: loc.FID, CID: loc.CID, Size: loc.Size, SHA1: loc.SHA1,
+			}, cfg.CloudFailedCID); err == nil {
+				note = "，原包已移入归档区/异常待查"
+			}
+		}
+		p.State = "failed"
+		p.Stage = "cloud_progress"
+		p.ErrorCode = code
+		p.ErrorMessage = msg + note
+		p.NextRunAt = 0
+		_ = s.store.UpdatePipeline(ctx, p)
+		_ = s.store.RecordEvent(ctx, p.ID, "FAILED", "cloud_progress", msg+note, true)
+	default: // confirm_local
+		p.State = "wait_local_confirm"
+		p.Stage = "local_fallback"
+		p.WaitReason = msg
+		p.ErrorCode = code
+		p.ErrorMessage = msg
+		p.NextRunAt = 0
+		_ = s.store.UpdatePipeline(ctx, p)
+		_ = s.store.RecordEvent(ctx, p.ID, "WAITING_APPROVAL", "local_fallback", msg+"，等待确认是否下载到本地解压", true)
 	}
-	p.State = "wait_local_confirm"
-	p.Stage = "local_fallback"
-	p.WaitReason = msg
-	p.ErrorCode = code
-	p.ErrorMessage = msg
-	p.NextRunAt = 0
-	_ = s.store.UpdatePipeline(ctx, p)
-	_ = s.store.RecordEvent(ctx, p.ID, "WAITING_APPROVAL", "local_fallback", msg+"，等待确认是否下载到本地解压", true)
+}
+
+func (s *Service) handleCloudOriginalAfterSuccess(ctx context.Context, cloud p115.Port, cfg P115Settings, p store.Pipeline, loc CloudLocator, rule ArchiveRuleConfig) string {
+	if cloud == nil || loc.FID == "" {
+		return ""
+	}
+	fLoc := p115.FileLocator{FID: loc.FID, CID: loc.CID, Size: loc.Size, SHA1: loc.SHA1}
+	switch rule.OriginalAction {
+	case "delete":
+		if err := cloud.DeleteVerified(ctx, fLoc); err == nil {
+			_ = s.store.RecordEvent(ctx, p.ID, "ORIGINAL_DELETED", "complete", "已按规则删除云端原压缩包", false)
+			return "原包已删除"
+		}
+	case "archive":
+		if cfg.CloudArchiveCID == "" {
+			return ""
+		}
+		targetDate := p.TargetDate
+		if targetDate == "" {
+			targetDate = time.Now().In(s.loc).Format("2006-01-02")
+		}
+		archDateCID, err := s.resolveDateFolder(ctx, cloud, cfg.CloudArchiveCID, targetDate)
+		if err != nil {
+			_ = s.store.RecordEvent(ctx, p.ID, "ARCHIVE_MOVE_WARN", "complete", "原包移入归档区失败（解压成品已保留）："+err.Error(), false)
+			return ""
+		}
+		if err := cloud.MoveVerified(ctx, fLoc, archDateCID); err != nil {
+			_ = s.store.RecordEvent(ctx, p.ID, "ARCHIVE_MOVE_WARN", "complete", "原包移入归档区失败（解压成品已保留）："+err.Error(), false)
+			return ""
+		}
+		_ = s.store.RecordEvent(ctx, p.ID, "ORIGINAL_ARCHIVED", "complete", "原压缩包已移入归档区/原包留存/"+targetDate, false)
+		return "原包已移入归档区/原包留存"
+	}
+	return ""
 }
 
 // cacheCloudArchive downloads a 115 archive using a fixed 32KB streaming buffer (ultra-low memory).
@@ -447,9 +685,10 @@ func (s *Service) stepLocalExtractions(ctx context.Context) error {
 	}
 
 	p := due[0]
+	rule := s.ArchiveRule(ctx)
 	var srcPath, outRoot string
-	var squash, disableRec, delOrig bool
 	var members []string
+	var cloudLoc CloudLocator
 
 	if p.Kind == "local_archive" {
 		var loc struct {
@@ -462,37 +701,46 @@ func (s *Service) stepLocalExtractions(ctx context.Context) error {
 		srcPath = loc.Path
 		members = loc.Members
 		outRoot = cfg.OutputDir
-		squash = cfg.SquashRoot
-		disableRec = cfg.DisableRecursion
-		delOrig = cfg.DeleteOriginal
+		if cfg.DeleteOriginal {
+			rule.OriginalAction = "delete"
+		}
 	} else {
-		var loc CloudLocator
-		_ = json.Unmarshal([]byte(p.LocatorJSON), &loc)
-		var rule ArchiveRuleConfig
-		_ = json.Unmarshal([]byte(p.PolicyJSON), &rule)
-		srcPath = loc.CachePath
-		outRoot = rule.OutputDir
-		squash = rule.SquashRoot
-		disableRec = rule.DisableRecursion
+		_ = json.Unmarshal([]byte(p.LocatorJSON), &cloudLoc)
+		var perRule ArchiveRuleConfig
+		if json.Unmarshal([]byte(p.PolicyJSON), &perRule) == nil {
+			if perRule.OriginalAction != "" {
+				rule.OriginalAction = perRule.OriginalAction
+			}
+			if perRule.OutputDir != "" {
+				outRoot = perRule.OutputDir
+			}
+		}
+		srcPath = cloudLoc.CachePath
 	}
 	if outRoot == "" {
 		outRoot = s.outputDir()
 	}
 
+	targetDate := p.TargetDate
+	if targetDate == "" {
+		targetDate = time.Now().In(s.loc).Format("2006-01-02")
+		p.TargetDate = targetDate
+	}
 	baseName := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
 	if baseName == "" {
 		baseName = p.ID
 	}
+	finalOutDir := filepath.Join(outRoot, targetDate, baseName)
 
 	_ = s.store.RecordEvent(ctx, p.ID, "LOCAL_EXTRACT_STARTED", "local_extract", "开始本地解压："+p.Name, false)
 	res, err := s.extractor.Extract(ctx, extract.Options{
 		Binary:           s.extractBin,
 		Source:           srcPath,
-		OutputDir:        filepath.Join(outRoot, baseName),
+		OutputDir:        finalOutDir,
 		Passwords:        s.ArchivePasswords(ctx),
 		MaxDictMB:        s.extractMaxDictMB,
-		SquashRoot:       squash,
-		DisableRecursion: disableRec,
+		SquashRoot:       true,
+		DisableRecursion: true,
 	})
 	if err != nil {
 		p.State = "failed"
@@ -505,13 +753,17 @@ func (s *Service) stepLocalExtractions(ctx context.Context) error {
 		return nil
 	}
 
-	// Clean up downloaded cache for cloud fallback, or delete local original only if explicitly requested.
-	if p.Kind == "cloud_archive" && srcPath != "" {
-		_ = os.RemoveAll(filepath.Dir(srcPath))
-	} else if p.Kind == "local_archive" && delOrig {
-		for _, m := range members {
-			_ = os.Remove(m)
+	// Handle original archive after successful local extraction.
+	origNote := ""
+	if p.Kind == "cloud_archive" {
+		if srcPath != "" {
+			_ = os.RemoveAll(filepath.Dir(srcPath))
 		}
+		if cloud, cfg := s.snapshotCloud(); cloud != nil {
+			origNote = s.handleCloudOriginalAfterSuccess(ctx, cloud, cfg, p, cloudLoc, rule)
+		}
+	} else {
+		origNote = s.handleLocalOriginalAfterSuccess(ctx, p, members, targetDate, rule)
 	}
 
 	outBytes, _ := json.Marshal(res)
@@ -523,23 +775,103 @@ func (s *Service) stepLocalExtractions(ctx context.Context) error {
 	p.CompletedAt = &now
 	p.NextRunAt = 0
 	_ = s.store.UpdatePipeline(ctx, p)
-	_ = s.store.RecordEvent(ctx, p.ID, "SUCCEEDED", "complete",
-		fmt.Sprintf("本地解压完成：%s（%d 个文件）", p.Name, len(res.Files)), true)
+	msg := fmt.Sprintf("本地解压完成：%s（%d 个文件）", p.Name, len(res.Files))
+	if origNote != "" {
+		msg += "，" + origNote
+	}
+	_ = s.store.RecordEvent(ctx, p.ID, "SUCCEEDED", "complete", msg, true)
 	return nil
 }
 
-func (s *Service) cacheDir() string {
-	if s.workDir != "" {
-		return filepath.Join(s.workDir, "cache")
+func (s *Service) handleLocalOriginalAfterSuccess(ctx context.Context, p store.Pipeline, members []string, targetDate string, rule ArchiveRuleConfig) string {
+	if len(members) == 0 {
+		return ""
 	}
-	return filepath.Join(s.dataDir, "cache")
+	switch rule.OriginalAction {
+	case "delete":
+		for _, m := range members {
+			_ = os.Remove(m)
+		}
+		_ = s.store.RecordEvent(ctx, p.ID, "ORIGINAL_DELETED", "complete", "已按规则删除本地原压缩包", false)
+		return "原包已删除"
+	case "archive":
+		destDir := filepath.Join(s.originalsDir(), targetDate)
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			return ""
+		}
+		moved := 0
+		for _, m := range members {
+			dst := uniqueDestPath(filepath.Join(destDir, filepath.Base(m)))
+			if err := moveFileSafe(m, dst); err == nil {
+				moved++
+			}
+		}
+		if moved > 0 {
+			_ = s.store.RecordEvent(ctx, p.ID, "ORIGINAL_ARCHIVED", "complete", "本地原包已移入归档区/原包留存/"+targetDate, false)
+			return "原包已移入归档区/原包留存"
+		}
+	}
+	return ""
+}
+
+func uniqueDestPath(dst string) string {
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return dst
+	}
+	ext := filepath.Ext(dst)
+	stem := strings.TrimSuffix(dst, ext)
+	for i := 1; i <= 100; i++ {
+		cand := fmt.Sprintf("%s_(%d)%s", stem, i, ext)
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+	}
+	return fmt.Sprintf("%s_%d%s", stem, time.Now().Unix(), ext)
+}
+
+func moveFileSafe(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		_ = in.Close()
+		return err
+	}
+	buf := make([]byte, 32*1024)
+	if _, err := io.CopyBuffer(out, in, buf); err != nil {
+		_ = out.Close()
+		_ = in.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = in.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	_ = in.Close()
+	return os.Remove(src)
+}
+
+func (s *Service) cacheDir() string {
+	return config.LocalCacheDir(s.dataDir, s.workDir)
 }
 
 func (s *Service) outputDir() string {
-	if s.workDir != "" {
-		return filepath.Join(s.workDir, "output")
-	}
-	return filepath.Join(s.dataDir, "output")
+	return config.LocalOutputDir(s.dataDir, s.workDir)
+}
+
+func (s *Service) originalsDir() string {
+	return config.LocalOriginalsDir(s.dataDir, s.workDir)
+}
+
+func (s *Service) historyDir() string {
+	return config.LocalHistoryDir(s.dataDir, s.workDir)
 }
 
 // ScanLocalNow triggers an immediate scan of local/NAS watched directories.
@@ -547,5 +879,5 @@ func (s *Service) ScanLocalNow(ctx context.Context) (int, error) {
 	if s.localWatcher == nil {
 		return 0, nil
 	}
-	return s.localWatcher.Scan(ctx, time.Now())
+	return s.localWatcher.Scan(ctx, time.Now().In(s.loc))
 }

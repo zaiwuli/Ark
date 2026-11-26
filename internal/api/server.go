@@ -80,6 +80,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/v1/settings/webhook", s.requireRole("admin", s.handlePutWebhook))
 	s.mux.HandleFunc("GET /api/v1/settings/passwords", s.requireRole("admin", s.handleGetPasswords))
 	s.mux.HandleFunc("PUT /api/v1/settings/passwords", s.requireRole("admin", s.handlePutPasswords))
+	s.mux.HandleFunc("GET /api/v1/settings/archive-rule", s.requireRole("admin", s.handleGetArchiveRule))
+	s.mux.HandleFunc("PUT /api/v1/settings/archive-rule", s.requireRole("admin", s.handlePutArchiveRule))
 
 	// 115 connection & cloud root management (admin)
 	s.mux.HandleFunc("GET /api/v1/settings/p115", s.requireRole("admin", s.handleGetP115))
@@ -87,6 +89,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/settings/p115/init-root", s.requireRole("admin", s.handleInitCloudRoot))
 	s.mux.HandleFunc("POST /api/v1/monitor/life-check", s.requireRole("admin", s.handleTriggerLifeCheck))
 	s.mux.HandleFunc("POST /api/v1/monitor/local-scan", s.requireRole("admin", s.handleTriggerLocalScan))
+	s.mux.HandleFunc("POST /api/v1/monitor/cloud-scan", s.requireRole("admin", s.handleTriggerCloudScan))
 
 	// Offline import & token-scoped batch status (compatible with third-party API)
 	s.mux.HandleFunc("POST /api/v1/offline/import", s.requireImportAuth(s.handleOfflineImport))
@@ -112,10 +115,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/v1/events", s.requireRole("admin", s.handleClearEvents))
 	s.mux.HandleFunc("DELETE /api/v1/bark/messages", s.requireRole("admin", s.handleClearBarkMessages))
 
-	// Maintenance & cache reclaim
+	// Maintenance, cache reclaim & date-folder organizer
 	s.mux.HandleFunc("GET /api/v1/maintenance/summary", s.requireRole("readonly", s.handleMaintenanceSummary))
 	s.mux.HandleFunc("POST /api/v1/maintenance/reclaim-cache", s.requireRole("admin", s.handleReclaimCache))
 	s.mux.HandleFunc("POST /api/v1/maintenance/vacuum", s.requireRole("admin", s.handleVacuumDB))
+	s.mux.HandleFunc("GET /api/v1/organizer/config", s.requireRole("admin", s.handleGetOrganizerConfig))
+	s.mux.HandleFunc("PUT /api/v1/organizer/config", s.requireRole("admin", s.handlePutOrganizerConfig))
+	s.mux.HandleFunc("POST /api/v1/organizer/preview", s.requireRole("admin", s.handlePreviewOrganize))
+	s.mux.HandleFunc("POST /api/v1/organizer/run", s.requireRole("admin", s.handleRunOrganize))
 
 	// Sources & Rules
 	s.mux.HandleFunc("GET /api/v1/sources", s.requireRole("readonly", s.handleListSources))

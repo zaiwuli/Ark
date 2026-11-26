@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zaiwuli/Ark/internal/config"
 	"github.com/zaiwuli/Ark/internal/extract"
 	"github.com/zaiwuli/Ark/internal/store"
 )
@@ -44,8 +45,8 @@ func NewWatcher(st *store.Store, workDir string, stableWindow time.Duration) *Wa
 	}
 	var watchDir, outDir string
 	if workDir != "" {
-		watchDir = filepath.Join(workDir, "watch")
-		outDir = filepath.Join(workDir, "output")
+		watchDir = config.LocalWatchDir("", workDir)
+		outDir = config.LocalOutputDir("", workDir)
 	}
 	return &Watcher{
 		store:         st,
@@ -161,6 +162,7 @@ func (w *Watcher) scanOne(ctx context.Context, sourceID string, cfg LocalSourceC
 			Identity:    identity,
 			SourceID:    sourceID,
 			Name:        e.Name(),
+			TargetDate:  now.Format("2006-01-02"),
 			Size:        totalSize,
 			LocatorJSON: string(locatorBytes),
 			PolicyJSON:  string(policyBytes),

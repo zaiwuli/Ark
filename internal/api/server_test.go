@@ -260,8 +260,8 @@ func TestMaintenanceClearAndCacheReclaim(t *testing.T) {
 	srv, st := newTestServer(t, true)
 	h := srv.Handler()
 
-	// Seed an orphaned cache file and a completed pipeline.
-	cacheSub := filepath.Join(srv.cacheRootDir(), "pl_old_done")
+	// Seed an orphaned cache file and pipelines.
+	cacheSub := filepath.Join(srv.cacheDirs()[0], "pl_old_done")
 	if err := os.MkdirAll(cacheSub, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +270,34 @@ func TestMaintenanceClearAndCacheReclaim(t *testing.T) {
 	}
 	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_done','offline','id_done','done.zip','completed','complete',1,1)`)
 	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_run','offline','id_run','run.zip','downloading','offline_poll',1,1)`)
+	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_cfail','cloud_archive','id_cfail','bad.rar','failed','cloud_prepare',1,1)`)
+
+	// Single-item retry on cloud_archive returns to cloud_prepare (not queued!).
+	recRetry := httptest.NewRecorder()
+	h.ServeHTTP(recRetry, httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/p_cfail/retry", nil))
+	if recRetry.Code != http.StatusOK || !bytes.Contains(recRetry.Body.Bytes(), []byte(`"state":"cloud_prepare"`)) {
+		t.Fatalf("cloud_archive single retry unexpected: %d %s", recRetry.Code, recRetry.Body.String())
+	}
+
+	// Active cloud_prepare pipeline cannot be deleted.
+	recDel := httptest.NewRecorder()
+	h.ServeHTTP(recDel, httptest.NewRequest(http.MethodDelete, "/api/v1/pipelines/p_cfail", nil))
+	if recDel.Code != http.StatusConflict {
+		t.Fatalf("active cloud_prepare delete expected 409, got %d", recDel.Code)
+	}
+
+	// Archive rule & organizer endpoints round-trip.
+	recRule := httptest.NewRecorder()
+	h.ServeHTTP(recRule, httptest.NewRequest(http.MethodPut, "/api/v1/settings/archive-rule",
+		bytes.NewBufferString(`{"original_action":"archive","cloud_failure_action":"auto_local"}`)))
+	if recRule.Code != http.StatusOK || !bytes.Contains(recRule.Body.Bytes(), []byte(`"cloud_failure_action":"auto_local"`)) {
+		t.Fatalf("archive-rule PUT unexpected: %d %s", recRule.Code, recRule.Body.String())
+	}
+	recOrg := httptest.NewRecorder()
+	h.ServeHTTP(recOrg, httptest.NewRequest(http.MethodPost, "/api/v1/organizer/preview", nil))
+	if recOrg.Code != http.StatusOK {
+		t.Fatalf("organizer preview expected 200, got %d: %s", recOrg.Code, recOrg.Body.String())
+	}
 
 	// Reclaim cache frees the orphaned 2048-byte file.
 	rec := httptest.NewRecorder()

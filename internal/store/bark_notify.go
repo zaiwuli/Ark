@@ -91,6 +91,14 @@ func (s *Store) SaveBarkMessage(ctx context.Context, m BarkMessage) (BarkMessage
 	return m, nil
 }
 
+func (s *Store) MarkBarkWindowDispatched(ctx context.Context, windowID string) error {
+	if windowID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE bark_messages SET status = 'dispatched' WHERE window_id = ?`, windowID)
+	return err
+}
+
 func (s *Store) ListBarkMessages(ctx context.Context, limit int) ([]BarkMessage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
