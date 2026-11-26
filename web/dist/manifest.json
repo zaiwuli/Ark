@@ -1,6 +1,6 @@
 {
-  "name": "Ark 方舟",
-  "short_name": "Ark 方舟",
+  "name": "方舟",
+  "short_name": "方舟",
   "description": "面向低内存 NAS 的 115 离线下载与云/本地解压控制台",
   "start_url": "/",
   "scope": "/",

@@ -224,7 +224,7 @@ function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + tab));
   document.querySelectorAll('.nav-item, .m-tab').forEach((n) => n.classList.toggle('active', n.dataset.tab === tab));
-  document.getElementById('page-title').textContent = TAB_TITLES[tab] || 'Ark 方舟';
+  document.getElementById('page-title').textContent = TAB_TITLES[tab] || '方舟';
 
   if (tab === 'tasks') loadPipelines();
   if (tab === 'sources') { loadSources(); loadArchiveRule(); loadSeedRule(); }
@@ -627,7 +627,7 @@ async function cancelPipe(id) {
 async function deletePipe(id) {
   let r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (r.status === 409) {
-    if (!confirm('该任务正在执行中，是否强制移除 Ark 队列记录？（绝不会删除 115 云端或本地真实文件）')) return;
+    if (!confirm('该任务正在执行中，是否强制移除队列记录？（绝不会删除 115 云端或本地真实文件）')) return;
     r = await fetch(`/api/v1/pipelines/${encodeURIComponent(id)}?force=1`, { method: 'DELETE' });
   }
   if (r.ok) showToast('已移除任务记录（不会删除真实文件）');
@@ -1263,7 +1263,7 @@ async function clearPipelines(scope, btn) {
   const tip = scope === 'completed'
     ? '确认清空所有「已完成」的任务记录？（仅清理记录，不删除真实文件）'
     : scope === 'all'
-      ? '确认清空「全部」任务记录（含排队中、待确认和已暂停任务）？（仅清空 Ark 队列记录，绝不删除 115 或本地真实文件）'
+      ? '确认清空「全部」任务记录（含排队中、待确认和已暂停任务）？（仅清空队列记录，绝不删除 115 或本地真实文件）'
       : '确认清空所有「已结束（完成+失败+已暂停）」的任务记录？（进行中任务会保留，且不删除真实文件）';
   if (!confirm(tip)) return;
   btn.disabled = true;

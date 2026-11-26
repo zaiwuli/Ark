@@ -84,7 +84,7 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 
 	ts := time.Unix(msg.Timestamp, 0).Format("2006-01-02 15:04:05")
 	text := fmt.Sprintf(
-		"%s <b>Ark 方舟 · %s</b>\n%s\n<code>阶段: %s · %s</code>",
+		"%s <b>方舟 · %s</b>\n%s\n<code>阶段: %s · %s</code>",
 		icon,
 		html.EscapeString(msg.Title),
 		html.EscapeString(msg.Body),
@@ -187,7 +187,7 @@ func (d *Dispatcher) SendTelegramTest(ctx context.Context) error {
 		Kind:      "TEST",
 		Stage:     "test",
 		Title:     "Telegram 通知测试",
-		Body:      "如果你看到这条消息，说明 Ark 方舟的 Telegram 通知通道已配置成功！",
+		Body:      "如果你看到这条消息，说明方舟的 Telegram 通知通道已配置成功！",
 		Timestamp: time.Now().Unix(),
 	})
 }
