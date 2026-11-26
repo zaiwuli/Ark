@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>方舟</title>
   <!-- Icons & iOS Standalone Web App Support -->
-  <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=3" />
-  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=3" />
-  <link rel="manifest" href="/manifest.json?v=3" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=4" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=4" />
+  <link rel="manifest" href="/manifest.json?v=4" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="方舟" />
@@ -19,7 +19,7 @@
     <!-- Desktop Left Sidebar -->
     <aside class="sidebar" aria-label="主导航">
       <div class="brand">
-        <img class="brand-logo" src="/apple-touch-icon.png?v=3" alt="方舟图标" />
+        <img class="brand-logo" src="/favicon.png?v=4" alt="方舟图标" />
         <div>
           <div class="brand-title">方舟</div>
           <div id="brand-ver" class="brand-sub">初始化中...</div>
@@ -459,7 +459,17 @@
                     <label for="p115-root">云根目录编号（CID）</label>
                     <input id="p115-root" type="text" placeholder="一键创建「离线下载 / 解压输出 / 归档区」3 个目录" />
                   </div>
-                  <div class="field" style="justify-content:flex-end;">
+                  <div class="field">
+                    <label for="p115-scan-depth">云目录手动扫描深度（默认 1 层防风控）</label>
+                    <select id="p115-scan-depth">
+                      <option value="1">1 层（仅当前目录，最安全推荐）</option>
+                      <option value="2">2 层（当前目录 + 1 层子目录）</option>
+                      <option value="3">3 层（当前目录 + 2 层子目录）</option>
+                      <option value="4">4 层</option>
+                      <option value="5">5 层</option>
+                    </select>
+                  </div>
+                  <div class="field span-2" style="justify-content:flex-end;">
                     <label class="check-label"><input id="p115-life" type="checkbox" /> 启用 30 分钟生活事件增量监测</label>
                   </div>
                 </div>
@@ -656,7 +666,7 @@
               <div class="panel-body">
                 <div class="form-grid">
                   <div class="field">
-                    <label for="org-mode">热数据保留方式</label>
+                    <label for="org-mode">自动整理保留方式（仅用于定期自动整理）</label>
                     <select id="org-mode" onchange="toggleRetentionDays()">
                       <option value="current_month">保留当月全部（收拢上月及更早日期，推荐）</option>
                       <option value="days">保留最近 N 天不动</option>
@@ -667,16 +677,28 @@
                     <input id="org-days" type="number" min="1" max="365" value="14" />
                   </div>
                 </div>
+                <div class="field-help" style="margin-top:12px;"><strong>勾选纳入整理的 115 系统目录：</strong></div>
+                <div class="toggle-row" style="margin-top:6px;">
+                  <label class="check-label"><input id="org-c-offline" type="checkbox" checked /> 115 离线下载</label>
+                  <label class="check-label"><input id="org-c-output" type="checkbox" checked /> 115 解压输出</label>
+                  <label class="check-label"><input id="org-c-archive" type="checkbox" checked /> 115 原包留存</label>
+                </div>
+                <div class="field-help" style="margin-top:12px;"><strong>勾选纳入整理的本地 NAS 系统目录：</strong></div>
+                <div class="toggle-row" style="margin-top:6px;">
+                  <label class="check-label"><input id="org-l-watch" type="checkbox" /> 本地监控</label>
+                  <label class="check-label"><input id="org-l-output" type="checkbox" checked /> 本地解压输出</label>
+                  <label class="check-label"><input id="org-l-archive" type="checkbox" checked /> 本地原包留存</label>
+                </div>
+                <div class="field-help" style="margin-top:12px;"><strong>勾选额外添加的云/本地监控来源</strong>（统一归入方舟「归档区/历史归档/来源名/」，仅整理 YYYY-MM-DD 日期目录，非日期目录不动）：</div>
+                <div id="org-extra-sources" class="toggle-row" style="margin-top:6px;"></div>
                 <div class="toggle-row" style="margin-top:14px;">
-                  <label class="check-label"><input id="org-cloud" type="checkbox" checked /> 整理 115 云端目录（离线下载 / 解压输出 / 原包留存）</label>
-                  <label class="check-label"><input id="org-local" type="checkbox" checked /> 整理本地 NAS 目录（解压输出 / 原包留存）</label>
-                  <label class="check-label"><input id="org-empty" type="checkbox" checked /> 顺手清理超过保留期的空日期目录</label>
-                  <label class="check-label"><input id="org-auto" type="checkbox" /> 启用定期自动整理（后台静默归并并推送汇总）</label>
+                  <label class="check-label"><input id="org-empty" type="checkbox" checked /> 顺手清理旧的空日期目录</label>
+                  <label class="check-label"><input id="org-auto" type="checkbox" /> 启用定期自动整理（按上方保留方式静默归并并推送汇总）</label>
                 </div>
                 <div class="toolbar" style="margin-top:16px;">
                   <button type="button" class="btn btn-primary" onclick="saveOrganizerConfig(this)">保存整理策略</button>
-                  <button type="button" class="btn btn-secondary" onclick="previewOrganize(this)">扫描预览待整理目录</button>
-                  <button type="button" class="btn btn-warn" onclick="runOrganize(this)">立即执行整理</button>
+                  <button type="button" class="btn btn-secondary" onclick="previewOrganize(this)">预览待整理（昨日及以前）</button>
+                  <button type="button" class="btn btn-warn" onclick="runOrganize(this)">立即整理（昨日及以前）</button>
                 </div>
                 <div id="org-preview-wrap" style="display:none;margin-top:16px;">
                   <div id="org-preview-summary" class="field-help" style="margin-bottom:8px;"></div>

@@ -110,12 +110,18 @@ func (s *Server) handlePutArchiveRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTriggerCloudScan(w http.ResponseWriter, r *http.Request) {
-	adopted, err := s.pipeline.ScanCloudSources(r.Context(), nil)
+	var req struct {
+		Mode  string `json:"mode"`  // "today" | "depth"
+		Depth int    `json:"depth"` // optional 1..5 override
+	}
+	_ = decodeJSON(r, &req, 4096)
+	todayOnly := req.Mode == "today"
+	adopted, err := s.pipeline.ScanCloudSourcesWithOptions(r.Context(), nil, todayOnly, req.Depth)
 	if err != nil {
 		s.writeDomainError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"adopted": adopted})
+	writeJSON(w, http.StatusOK, map[string]any{"adopted": adopted, "mode": req.Mode})
 }
 
 func (s *Server) handleGetOrganizerConfig(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +143,7 @@ func (s *Server) handlePutOrganizerConfig(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handlePreviewOrganize(w http.ResponseWriter, r *http.Request) {
-	plan, err := s.pipeline.PreviewOrganize(r.Context())
+	plan, err := s.pipeline.PreviewOrganizeWithMode(r.Context(), true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
@@ -146,7 +152,7 @@ func (s *Server) handlePreviewOrganize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRunOrganize(w http.ResponseWriter, r *http.Request) {
-	res, err := s.pipeline.RunOrganize(r.Context(), false)
+	res, err := s.pipeline.RunOrganizeWithMode(r.Context(), false, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return

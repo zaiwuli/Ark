@@ -40,6 +40,17 @@ type P115Settings struct {
 	CloudHistoryCID     string `json:"cloud_history_cid"`
 	CloudExtractByDate  *bool  `json:"cloud_extract_by_date,omitempty"`
 	LifeMonitorEnabled  bool   `json:"life_monitor_enabled"`
+	CloudScanDepth      int    `json:"cloud_scan_depth,omitempty"` // 1..5, default 1
+}
+
+func (c P115Settings) ScanDepth() int {
+	if c.CloudScanDepth < 1 {
+		return 1
+	}
+	if c.CloudScanDepth > 5 {
+		return 5
+	}
+	return c.CloudScanDepth
 }
 
 func (c P115Settings) ExtractByDateEnabled() bool {
@@ -218,6 +229,15 @@ func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P1
 	}
 	if incoming.CloudHistoryCID == "" {
 		incoming.CloudHistoryCID = existing.CloudHistoryCID
+	}
+	if incoming.CloudScanDepth <= 0 {
+		if existing.CloudScanDepth >= 1 && existing.CloudScanDepth <= 5 {
+			incoming.CloudScanDepth = existing.CloudScanDepth
+		} else {
+			incoming.CloudScanDepth = 1
+		}
+	} else if incoming.CloudScanDepth > 5 {
+		incoming.CloudScanDepth = 5
 	}
 	def := true
 	incoming.CloudExtractByDate = &def
@@ -723,11 +743,9 @@ func (s *Service) HandleBarkTrigger(ctx context.Context, targets []BarkTarget) (
 			}
 		}
 	} else {
-		n, err := s.ScanCloudSources(ctx, nil)
-		if err != nil {
-			return 0, err
-		}
-		adopted += n
+		// Anti-risk-control: do NOT fall back to full recursive cloud sweep when Bark didn't match any source prefix.
+		_ = s.store.RecordEvent(ctx, "system", "BARK_TARGET_CHECKED", "bark",
+			"收到 Bark 信号但未命中任何云来源路径前缀，已跳过全盘扫描（防风控）", false)
 	}
 
 	if cfg.LifeMonitorEnabled {

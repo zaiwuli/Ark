@@ -129,7 +129,7 @@ button, a, select, input[type="checkbox"], summary { cursor: pointer; }
 .brand-logo {
   width: 36px;
   height: 36px;
-  border-radius: 10px;
+  border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
   box-shadow: 0 4px 14px rgba(27, 73, 84, 0.35);

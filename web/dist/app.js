@@ -942,6 +942,8 @@ async function loadLogs() {
 async function loadP115() {
   const d = await fetch('/api/v1/settings/p115').then((r) => r.json());
   document.getElementById('p115-life').checked = !!d.life_monitor_enabled;
+  const depthEl = document.getElementById('p115-scan-depth');
+  if (depthEl) depthEl.value = String(d.cloud_scan_depth || 1);
   const rootInput = document.getElementById('p115-root');
   if (d.cloud_root_cid || !rootInput.value.trim()) {
     rootInput.value = d.cloud_root_cid || '';
@@ -954,6 +956,7 @@ async function saveP115(btn) {
   hideAlert('p115-alert');
   btn.disabled = true;
   try {
+    const depthEl = document.getElementById('p115-scan-depth');
     const r = await fetch('/api/v1/settings/p115', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -961,6 +964,7 @@ async function saveP115(btn) {
         cookie: document.getElementById('p115-cookie').value.trim(),
         cloud_root_cid: document.getElementById('p115-root').value.trim(),
         life_monitor_enabled: document.getElementById('p115-life').checked,
+        cloud_scan_depth: depthEl ? Number(depthEl.value) || 1 : 1,
       }),
     });
     const d = await r.json().catch(() => ({}));
@@ -1149,12 +1153,38 @@ function toggleRetentionDays() {
 
 async function loadOrganizerConfig() {
   try {
-    const d = await fetch('/api/v1/organizer/config').then((r) => r.json());
+    const [d, srcResp] = await Promise.all([
+      fetch('/api/v1/organizer/config').then((r) => r.json()),
+      fetch('/api/v1/sources').then((r) => r.json()).catch(() => ({ items: [] })),
+    ]);
     if (!document.getElementById('org-mode')) return;
     document.getElementById('org-mode').value = d.retention_mode || 'current_month';
     document.getElementById('org-days').value = d.retention_days || 14;
-    document.getElementById('org-cloud').checked = d.include_cloud !== false;
-    document.getElementById('org-local').checked = d.include_local !== false;
+    const hasCloudCats = Array.isArray(d.cloud_categories);
+    const cloudCats = hasCloudCats ? d.cloud_categories : (d.include_cloud !== false ? ['offline', 'output', 'archive'] : []);
+    document.getElementById('org-c-offline').checked = cloudCats.includes('offline');
+    document.getElementById('org-c-output').checked = cloudCats.includes('output');
+    document.getElementById('org-c-archive').checked = cloudCats.includes('archive');
+
+    const hasLocalCats = Array.isArray(d.local_categories);
+    const localCats = hasLocalCats ? d.local_categories : (d.include_local !== false ? ['output', 'archive'] : []);
+    document.getElementById('org-l-watch').checked = localCats.includes('watch');
+    document.getElementById('org-l-output').checked = localCats.includes('output');
+    document.getElementById('org-l-archive').checked = localCats.includes('archive');
+
+    const extraWrap = document.getElementById('org-extra-sources');
+    if (extraWrap) {
+      const selectedExtra = new Set(Array.isArray(d.extra_source_ids) ? d.extra_source_ids : []);
+      const sources = srcResp.items || [];
+      extraWrap.innerHTML = sources.length
+        ? sources.map((s) => `
+          <label class="check-label">
+            <input type="checkbox" class="org-extra-cb" value="${esc(s.id)}" ${selectedExtra.has(s.id) ? 'checked' : ''} />
+            [${s.kind === 'cloud' ? '115 云' : '本地'}] ${esc(s.name)}
+          </label>`).join('')
+        : '<span class="field-help">暂无额外添加的监控来源（可在「来源与规则」中添加）</span>';
+    }
+
     document.getElementById('org-empty').checked = d.clean_empty !== false;
     document.getElementById('org-auto').checked = !!d.auto_enabled;
     toggleRetentionDays();
@@ -1164,14 +1194,29 @@ async function loadOrganizerConfig() {
 async function saveOrganizerConfig(btn) {
   btn.disabled = true;
   try {
+    const cloud_categories = [];
+    if (document.getElementById('org-c-offline').checked) cloud_categories.push('offline');
+    if (document.getElementById('org-c-output').checked) cloud_categories.push('output');
+    if (document.getElementById('org-c-archive').checked) cloud_categories.push('archive');
+
+    const local_categories = [];
+    if (document.getElementById('org-l-watch').checked) local_categories.push('watch');
+    if (document.getElementById('org-l-output').checked) local_categories.push('output');
+    if (document.getElementById('org-l-archive').checked) local_categories.push('archive');
+
+    const extra_source_ids = Array.from(document.querySelectorAll('.org-extra-cb:checked')).map((el) => el.value);
+
     const r = await fetch('/api/v1/organizer/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         retention_mode: document.getElementById('org-mode').value,
         retention_days: Math.max(1, Number(document.getElementById('org-days').value) || 14),
-        include_cloud: document.getElementById('org-cloud').checked,
-        include_local: document.getElementById('org-local').checked,
+        include_cloud: cloud_categories.length > 0,
+        include_local: local_categories.length > 0,
+        cloud_categories,
+        local_categories,
+        extra_source_ids,
         clean_empty: document.getElementById('org-empty').checked,
         auto_enabled: document.getElementById('org-auto').checked,
       }),

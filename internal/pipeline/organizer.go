@@ -2,11 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/zaiwuli/Ark/internal/p115"
@@ -15,13 +17,16 @@ import (
 var strictDateDirRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 type OrganizerConfig struct {
-	AutoEnabled   bool   `json:"auto_enabled"`
-	RetentionMode string `json:"retention_mode"` // current_month (default) | days
-	RetentionDays int    `json:"retention_days"` // default 14 (used when mode == "days")
-	CleanEmpty    bool   `json:"clean_empty"`    // default true
-	IncludeCloud  bool   `json:"include_cloud"`  // default true
-	IncludeLocal  bool   `json:"include_local"`  // default true
-	LastAutoKey   string `json:"last_auto_key,omitempty"`
+	AutoEnabled     bool     `json:"auto_enabled"`
+	RetentionMode   string   `json:"retention_mode"` // current_month (default) | days
+	RetentionDays   int      `json:"retention_days"` // default 14 (used when mode == "days")
+	CleanEmpty      bool     `json:"clean_empty"`    // default true
+	IncludeCloud    bool     `json:"include_cloud"`  // default true
+	IncludeLocal    bool     `json:"include_local"`  // default true
+	CloudCategories []string `json:"cloud_categories,omitempty"` // offline | output | archive (nil => all 3)
+	LocalCategories []string `json:"local_categories,omitempty"` // watch | output | archive (nil => output, archive)
+	ExtraSourceIDs  []string `json:"extra_source_ids,omitempty"` // user-added cloud/local source IDs
+	LastAutoKey     string   `json:"last_auto_key,omitempty"`
 }
 
 func DefaultOrganizerConfig() OrganizerConfig {
@@ -96,7 +101,7 @@ func (s *Service) SaveOrganizerConfig(ctx context.Context, incoming OrganizerCon
 	return norm, nil
 }
 
-func (s *Service) isDateEligible(name string, now time.Time, cfg OrganizerConfig) (time.Time, bool) {
+func (s *Service) isDateEligible(name string, now time.Time, cfg OrganizerConfig, manual bool) (time.Time, bool) {
 	if !strictDateDirRe.MatchString(name) {
 		return time.Time{}, false
 	}
@@ -108,6 +113,10 @@ func (s *Service) isDateEligible(name string, now time.Time, cfg OrganizerConfig
 	if name >= todayStr {
 		return time.Time{}, false
 	}
+	if manual {
+		// Manual organization archives yesterday and all earlier YYYY-MM-DD folders.
+		return parsed, true
+	}
 	if cfg.RetentionMode == "days" {
 		cutoff := now.AddDate(0, 0, -cfg.RetentionDays).Format("2006-01-02")
 		return parsed, name < cutoff
@@ -117,6 +126,28 @@ func (s *Service) isDateEligible(name string, now time.Time, cfg OrganizerConfig
 	return parsed, name[:7] < curMonth
 }
 
+func categorySelected(selected []string, key string, defaultVal bool) bool {
+	if selected == nil {
+		return defaultVal
+	}
+	for _, s := range selected {
+		if s == key {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeArchiveCatName(name string) string {
+	s := strings.TrimSpace(name)
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+	if s == "" {
+		return "其他来源"
+	}
+	return s
+}
+
 func historyTargetRel(category, dateStr string) (yearDir, monthDir, display string) {
 	yearDir = dateStr[:4] + "年"
 	monthDir = dateStr[:7]
@@ -124,16 +155,28 @@ func historyTargetRel(category, dateStr string) (yearDir, monthDir, display stri
 	return yearDir, monthDir, display
 }
 
-// PreviewOrganize scans local and/or 115 cloud managed folders and produces a dry-run plan without modifying files.
+// PreviewOrganize scans managed folders using the configured automatic retention policy.
 func (s *Service) PreviewOrganize(ctx context.Context) (OrganizePlan, error) {
-	return s.buildOrganizePlan(ctx, time.Now().In(s.loc))
+	return s.buildOrganizePlan(ctx, time.Now().In(s.loc), false)
 }
 
-func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time) (OrganizePlan, error) {
+// PreviewOrganizeWithMode produces a dry-run plan; when manual is true, yesterday and all earlier dates are included.
+func (s *Service) PreviewOrganizeWithMode(ctx context.Context, manual bool) (OrganizePlan, error) {
+	return s.buildOrganizePlan(ctx, time.Now().In(s.loc), manual)
+}
+
+func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time, manual bool) (OrganizePlan, error) {
 	orgCfg := s.OrganizerConfig(ctx)
 	activeDates, activeCIDs, err := s.store.ActiveDatesAndCIDs(ctx)
 	if err != nil {
 		return OrganizePlan{}, err
+	}
+
+	extraSet := make(map[string]bool, len(orgCfg.ExtraSourceIDs))
+	for _, id := range orgCfg.ExtraSourceIDs {
+		if strings.TrimSpace(id) != "" {
+			extraSet[strings.TrimSpace(id)] = true
+		}
 	}
 
 	plan := OrganizePlan{
@@ -142,119 +185,168 @@ func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time) (Organiz
 		Actions:     make([]OrganizeAction, 0),
 	}
 
-	// 1. Scan local managed folders (解压输出 / 原包留存)
+	// 1. Scan local managed folders & selected extra local sources
+	type localTarget struct {
+		cat string
+		dir string
+	}
+	var localTargets []localTarget
 	if orgCfg.IncludeLocal {
-		localCats := []struct {
-			cat string
-			dir string
-		}{
-			{"解压输出", s.outputDir()},
-			{"原包留存", s.originalsDir()},
+		if categorySelected(orgCfg.LocalCategories, "watch", false) {
+			localTargets = append(localTargets, localTarget{"本地监控", filepath.Join(s.workDir, "本地监控")})
 		}
-		for _, lc := range localCats {
-			entries, err := os.ReadDir(lc.dir)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if !e.IsDir() {
+		if categorySelected(orgCfg.LocalCategories, "output", true) {
+			localTargets = append(localTargets, localTarget{"解压输出", s.outputDir()})
+		}
+		if categorySelected(orgCfg.LocalCategories, "archive", true) {
+			localTargets = append(localTargets, localTarget{"原包留存", s.originalsDir()})
+		}
+	}
+	if len(extraSet) > 0 {
+		if localSources, lErr := s.store.ListSources(ctx, "local"); lErr == nil {
+			for _, src := range localSources {
+				if !extraSet[src.ID] {
 					continue
 				}
-				name := e.Name()
-				if _, ok := s.isDateEligible(name, now, orgCfg); !ok {
-					continue
+				var sc struct {
+					Path string `json:"path"`
 				}
-				if activeDates[name] {
-					plan.SkippedActive++
-					continue
-				}
-				full := filepath.Join(lc.dir, name)
-				children, _ := os.ReadDir(full)
-				_, _, dispTarget := historyTargetRel(lc.cat, name)
-				if len(children) == 0 && orgCfg.CleanEmpty {
-					plan.Actions = append(plan.Actions, OrganizeAction{
-						Scope:      "local",
-						Category:   lc.cat,
-						Date:       name,
-						Action:     "delete_empty",
-						SourcePath: full,
-						TargetPath: "清理空目录",
+				if json.Unmarshal([]byte(src.ConfigJSON), &sc) == nil && strings.TrimSpace(sc.Path) != "" {
+					localTargets = append(localTargets, localTarget{
+						cat: sanitizeArchiveCatName(src.Name),
+						dir: strings.TrimSpace(sc.Path),
 					})
-					plan.EmptyCount++
-				} else {
-					plan.Actions = append(plan.Actions, OrganizeAction{
-						Scope:      "local",
-						Category:   lc.cat,
-						Date:       name,
-						Action:     "move",
-						SourcePath: full,
-						TargetPath: dispTarget,
-					})
-					plan.MoveCount++
 				}
 			}
 		}
 	}
-
-	// 2. Scan 115 cloud managed folders (离线下载 / 解压输出 / 原包留存)
-	if orgCfg.IncludeCloud {
-		cloud, p115Cfg := s.snapshotCloud()
-		if cloud != nil && (p115Cfg.CloudHistoryCID != "" || p115Cfg.CloudArchiveZoneCID != "" || p115Cfg.CloudRootCID != "") {
-			cloudCats := []struct {
-				cat string
-				cid string
-			}{
-				{"离线下载", p115Cfg.OfflineRootCID},
-				{"解压输出", p115Cfg.CloudOutputCID},
-				{"原包留存", p115Cfg.CloudArchiveCID},
+	for _, lc := range localTargets {
+		entries, err := os.ReadDir(lc.dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
 			}
-			for _, cc := range cloudCats {
-				if cc.cid == "" {
+			name := e.Name()
+			if _, ok := s.isDateEligible(name, now, orgCfg, manual); !ok {
+				continue
+			}
+			if activeDates[name] {
+				plan.SkippedActive++
+				continue
+			}
+			full := filepath.Join(lc.dir, name)
+			children, _ := os.ReadDir(full)
+			_, _, dispTarget := historyTargetRel(lc.cat, name)
+			if len(children) == 0 && orgCfg.CleanEmpty {
+				plan.Actions = append(plan.Actions, OrganizeAction{
+					Scope:      "local",
+					Category:   lc.cat,
+					Date:       name,
+					Action:     "delete_empty",
+					SourcePath: full,
+					TargetPath: "清理空目录",
+				})
+				plan.EmptyCount++
+			} else {
+				plan.Actions = append(plan.Actions, OrganizeAction{
+					Scope:      "local",
+					Category:   lc.cat,
+					Date:       name,
+					Action:     "move",
+					SourcePath: full,
+					TargetPath: dispTarget,
+				})
+				plan.MoveCount++
+			}
+		}
+	}
+
+	// 2. Scan 115 cloud managed folders & selected extra cloud sources
+	cloud, p115Cfg := s.snapshotCloud()
+	if cloud != nil && (p115Cfg.CloudHistoryCID != "" || p115Cfg.CloudArchiveZoneCID != "" || p115Cfg.CloudRootCID != "") {
+		type cloudTarget struct {
+			cat string
+			cid string
+		}
+		var cloudTargets []cloudTarget
+		if orgCfg.IncludeCloud {
+			if categorySelected(orgCfg.CloudCategories, "offline", true) && p115Cfg.OfflineRootCID != "" {
+				cloudTargets = append(cloudTargets, cloudTarget{"离线下载", p115Cfg.OfflineRootCID})
+			}
+			if categorySelected(orgCfg.CloudCategories, "output", true) && p115Cfg.CloudOutputCID != "" {
+				cloudTargets = append(cloudTargets, cloudTarget{"解压输出", p115Cfg.CloudOutputCID})
+			}
+			if categorySelected(orgCfg.CloudCategories, "archive", true) && p115Cfg.CloudArchiveCID != "" {
+				cloudTargets = append(cloudTargets, cloudTarget{"原包留存", p115Cfg.CloudArchiveCID})
+			}
+		}
+		if len(extraSet) > 0 {
+			if cloudSources, cErr := s.store.ListSources(ctx, "cloud"); cErr == nil {
+				for _, src := range cloudSources {
+					if !extraSet[src.ID] {
+						continue
+					}
+					var sc struct {
+						CID string `json:"cid"`
+					}
+					if json.Unmarshal([]byte(src.ConfigJSON), &sc) == nil && strings.TrimSpace(sc.CID) != "" {
+						cloudTargets = append(cloudTargets, cloudTarget{
+							cat: sanitizeArchiveCatName(src.Name),
+							cid: strings.TrimSpace(sc.CID),
+						})
+					}
+				}
+			}
+		}
+		for _, cc := range cloudTargets {
+			if cc.cid == "" {
+				continue
+			}
+			files, err := listAllCloudFiles(ctx, cloud, cc.cid)
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if !f.IsDir {
 					continue
 				}
-				files, err := listAllCloudFiles(ctx, cloud, cc.cid)
-				if err != nil {
+				if _, ok := s.isDateEligible(f.Name, now, orgCfg, manual); !ok {
 					continue
 				}
-				for _, f := range files {
-					if !f.IsDir {
-						continue
-					}
-					if _, ok := s.isDateEligible(f.Name, now, orgCfg); !ok {
-						continue
-					}
-					if activeDates[f.Name] || activeCIDs[f.FID] {
-						plan.SkippedActive++
-						continue
-					}
-					sub, subErr := cloud.Files(ctx, f.FID, 0)
-					isEmpty := subErr == nil && len(sub.Files) == 0
-					_, _, dispTarget := historyTargetRel(cc.cat, f.Name)
-					if isEmpty && orgCfg.CleanEmpty {
-						plan.Actions = append(plan.Actions, OrganizeAction{
-							Scope:      "cloud",
-							Category:   cc.cat,
-							Date:       f.Name,
-							Action:     "delete_empty",
-							SourcePath: cc.cat + "/" + f.Name,
-							TargetPath: "清理空目录",
-							SourceCID:  cc.cid,
-							FolderFID:  f.FID,
-						})
-						plan.EmptyCount++
-					} else {
-						plan.Actions = append(plan.Actions, OrganizeAction{
-							Scope:      "cloud",
-							Category:   cc.cat,
-							Date:       f.Name,
-							Action:     "move",
-							SourcePath: cc.cat + "/" + f.Name,
-							TargetPath: dispTarget,
-							SourceCID:  cc.cid,
-							FolderFID:  f.FID,
-						})
-						plan.MoveCount++
-					}
+				if activeDates[f.Name] || activeCIDs[f.FID] {
+					plan.SkippedActive++
+					continue
+				}
+				sub, subErr := cloud.Files(ctx, f.FID, 0)
+				isEmpty := subErr == nil && len(sub.Files) == 0
+				_, _, dispTarget := historyTargetRel(cc.cat, f.Name)
+				if isEmpty && orgCfg.CleanEmpty {
+					plan.Actions = append(plan.Actions, OrganizeAction{
+						Scope:      "cloud",
+						Category:   cc.cat,
+						Date:       f.Name,
+						Action:     "delete_empty",
+						SourcePath: cc.cat + "/" + f.Name,
+						TargetPath: "清理空目录",
+						SourceCID:  cc.cid,
+						FolderFID:  f.FID,
+					})
+					plan.EmptyCount++
+				} else {
+					plan.Actions = append(plan.Actions, OrganizeAction{
+						Scope:      "cloud",
+						Category:   cc.cat,
+						Date:       f.Name,
+						Action:     "move",
+						SourcePath: cc.cat + "/" + f.Name,
+						TargetPath: dispTarget,
+						SourceCID:  cc.cid,
+						FolderFID:  f.FID,
+					})
+					plan.MoveCount++
 				}
 			}
 		}
@@ -272,13 +364,18 @@ func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time) (Organiz
 	return plan, nil
 }
 
-// RunOrganize executes the date-folder organization plan, folding old YYYY-MM-DD folders into 归档区/历史归档/<分类>/<YYYY年>/<YYYY-MM>/.
+// RunOrganize executes the date-folder organization plan using the automatic retention policy.
 func (s *Service) RunOrganize(ctx context.Context, notifyUser bool) (OrganizeResult, error) {
-	return s.runOrganizeAt(ctx, time.Now().In(s.loc), notifyUser)
+	return s.runOrganizeAt(ctx, time.Now().In(s.loc), notifyUser, false)
 }
 
-func (s *Service) runOrganizeAt(ctx context.Context, now time.Time, notifyUser bool) (OrganizeResult, error) {
-	plan, err := s.buildOrganizePlan(ctx, now)
+// RunOrganizeWithMode executes the date-folder organization plan; when manual is true, yesterday and earlier are archived.
+func (s *Service) RunOrganizeWithMode(ctx context.Context, notifyUser, manual bool) (OrganizeResult, error) {
+	return s.runOrganizeAt(ctx, time.Now().In(s.loc), notifyUser, manual)
+}
+
+func (s *Service) runOrganizeAt(ctx context.Context, now time.Time, notifyUser, manual bool) (OrganizeResult, error) {
+	plan, err := s.buildOrganizePlan(ctx, now, manual)
 	if err != nil {
 		return OrganizeResult{}, err
 	}
@@ -441,7 +538,7 @@ func (s *Service) maybeAutoOrganize(ctx context.Context) {
 	if cfg.LastAutoKey == key {
 		return
 	}
-	res, err := s.runOrganizeAt(ctx, now, true)
+	res, err := s.runOrganizeAt(ctx, now, true, false)
 	if err == nil && res.FailedCount == 0 {
 		cfg.LastAutoKey = key
 		_, _ = s.SaveOrganizerConfig(ctx, cfg)

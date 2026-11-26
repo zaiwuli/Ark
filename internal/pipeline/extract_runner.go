@@ -295,9 +295,16 @@ func (s *Service) scanBarkTarget(ctx context.Context, cloud p115.Port, cfg P115S
 	return s.scanCloudDirRecursive(ctx, cloud, cfg, rule, src.ID, cid, today, 2)
 }
 
-// ScanCloudSources scans enabled 115 cloud watch sources recursively (up to 3 levels)
-// and enqueues newly discovered primary archive files into cloud_archive pipelines.
+// ScanCloudSources scans enabled 115 cloud watch sources using the configured scan depth (default 1 level).
 func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) (int, error) {
+	return s.ScanCloudSourcesWithOptions(ctx, onlySourceIDs, false, 0)
+}
+
+// ScanCloudSourcesWithOptions scans enabled 115 cloud watch sources.
+// When todayOnly is true, it prefers only today's YYYY-MM-DD subfolder; if a source has no date subfolders
+// at all, it gently checks only top-level files (depth 1) without descending into historical folders.
+// When todayOnly is false, it scans up to maxLevels (1..5, defaulting to cfg.ScanDepth(), default 1).
+func (s *Service) ScanCloudSourcesWithOptions(ctx context.Context, onlySourceIDs []string, todayOnly bool, depthOverride int) (int, error) {
 	cloud, cfg := s.snapshotCloud()
 	if cloud == nil {
 		return 0, ErrP115NotConfigured
@@ -312,6 +319,15 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 			filterSet[id] = true
 		}
 	}
+
+	levels := cfg.ScanDepth()
+	if depthOverride >= 1 {
+		levels = depthOverride
+		if levels > 5 {
+			levels = 5
+		}
+	}
+	maxSubDepth := levels - 1 // 1 level => depth 0 only (no recursion)
 
 	s.lastCloudScan = time.Now().Unix()
 	rule := s.ArchiveRule(ctx)
@@ -334,11 +350,17 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 			continue
 		}
 		srcCID := strings.TrimSpace(sc.CID)
-		n, err := s.scanCloudDirRecursive(ctx, cloud, cfg, rule, src.ID, srcCID, today, 3)
-		if err != nil {
+		var n int
+		var scanErr error
+		if todayOnly {
+			n, scanErr = s.scanCloudSourceTodayOnly(ctx, cloud, cfg, rule, src.ID, srcCID, today)
+		} else {
+			n, scanErr = s.scanCloudDirRecursive(ctx, cloud, cfg, rule, src.ID, srcCID, today, maxSubDepth)
+		}
+		if scanErr != nil {
 			failedSources++
 			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
-				fmt.Sprintf("扫描云监控目录「%s」(CID=%s)失败：%s", src.Name, srcCID, err.Error()), true)
+				fmt.Sprintf("扫描云监控目录「%s」(CID=%s)失败：%s", src.Name, srcCID, scanErr.Error()), true)
 			continue
 		}
 		scanned++
@@ -347,8 +369,47 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 
 	if adopted > 0 || (len(onlySourceIDs) == 0 && scanned > 0 && failedSources == 0) {
 		if adopted > 0 {
+			modeDesc := fmt.Sprintf("深度 %d 层", levels)
+			if todayOnly {
+				modeDesc = "仅今日模式"
+			}
 			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
-				fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), true)
+				fmt.Sprintf("已扫描 %d 个 115 云监控目录（%s），新接管 %d 个压缩包进入云解压", scanned, modeDesc, adopted), true)
+		}
+	}
+	return adopted, nil
+}
+
+func (s *Service) scanCloudSourceTodayOnly(ctx context.Context, cloud p115.Port, cfg P115Settings, rule ArchiveRuleConfig, sourceID, srcCID, today string) (int, error) {
+	files, err := listAllCloudFiles(ctx, cloud, srcCID)
+	if err != nil {
+		return 0, err
+	}
+	var todayDirCID string
+	hasAnyDateDir := false
+	for _, f := range files {
+		if f.IsDir && strictDateDirRe.MatchString(f.Name) {
+			hasAnyDateDir = true
+			if f.Name == today {
+				todayDirCID = f.FID
+			}
+		}
+	}
+	if todayDirCID != "" {
+		return s.scanCloudDirRecursive(ctx, cloud, cfg, rule, sourceID, todayDirCID, today, 0)
+	}
+	if hasAnyDateDir {
+		// Date-layered folder exists, but today's folder hasn't been created yet -> skip old dates safely.
+		return 0, nil
+	}
+	// Flat / non-date folder: gently adopt only top-level archives already listed (0 extra API calls).
+	adopted := 0
+	for _, f := range files {
+		if f.IsDir || !extract.IsPrimaryArchiveName(f.Name) {
+			continue
+		}
+		if s.adoptCloudArchive(ctx, "", sourceID, f, today, cfg, rule) {
+			adopted++
 		}
 	}
 	return adopted, nil

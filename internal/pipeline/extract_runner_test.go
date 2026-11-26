@@ -320,7 +320,7 @@ func TestDateFolderOrganizerCloudAndLocal(t *testing.T) {
 	})
 
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, svc.loc)
-	plan, err := svc.buildOrganizePlan(t.Context(), now)
+	plan, err := svc.buildOrganizePlan(t.Context(), now, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestDateFolderOrganizerCloudAndLocal(t *testing.T) {
 			plan.MoveCount, plan.EmptyCount, plan.SkippedActive, plan.Actions)
 	}
 
-	res, err := svc.runOrganizeAt(t.Context(), now, false)
+	res, err := svc.runOrganizeAt(t.Context(), now, false, false)
 	if err != nil || res.MovedCount != 2 || res.DeletedEmpty != 2 || res.FailedCount != 0 {
 		t.Fatalf("unexpected run result: %+v err=%v", res, err)
 	}
@@ -352,5 +352,54 @@ func TestDateFolderOrganizerCloudAndLocal(t *testing.T) {
 	// Verify cloud move & empty delete.
 	if len(mock.Moved) != 1 || len(mock.Deleted) != 1 || mock.Deleted[0] != "d_empty" {
 		t.Fatalf("expected 1 cloud move and 1 empty delete, got moved=%v deleted=%v", mock.Moved, mock.Deleted)
+	}
+
+	// Manual mode archives yesterday (2026-11-25) & earlier, including selected extra cloud source,
+	// while leaving today (2026-11-26) and non-date folders untouched.
+	extraSrc, err := st.UpsertSource(t.Context(), store.Source{
+		Name:       "综合讨论",
+		Kind:       "cloud",
+		Enabled:    true,
+		ConfigJSON: `{"cid":"extra_cid"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.Listings["extra_cid"] = []p115.CloudFile{
+		{FID: "ex_yest", CID: "extra_cid", Name: "2026-11-25", IsDir: true},
+		{FID: "ex_today", CID: "extra_cid", Name: "2026-11-26", IsDir: true},
+		{FID: "ex_misc", CID: "extra_cid", Name: "固定分类文件夹", IsDir: true},
+	}
+	mock.Listings["ex_yest"] = []p115.CloudFile{{FID: "f_y1", CID: "ex_yest", Name: "item.zip", Size: 100}}
+	mock.Listings["ex_today"] = []p115.CloudFile{{FID: "f_t1", CID: "ex_today", Name: "today.zip", Size: 100}}
+
+	_, err = svc.SaveOrganizerConfig(t.Context(), OrganizerConfig{
+		RetentionMode:   "current_month",
+		CleanEmpty:      true,
+		IncludeCloud:    false,
+		IncludeLocal:    false,
+		CloudCategories: []string{},
+		LocalCategories: []string{},
+		ExtraSourceIDs:  []string{extraSrc.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manPlan, err := svc.buildOrganizePlan(t.Context(), now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manPlan.MoveCount != 1 || len(manPlan.Actions) != 1 || manPlan.Actions[0].Category != "综合讨论" || manPlan.Actions[0].Date != "2026-11-25" {
+		t.Fatalf("expected manual plan to archive only 综合讨论/2026-11-25, got %+v", manPlan.Actions)
+	}
+
+	// Default scan depth = 1 should NOT descend into subfolders; depth=2 should descend.
+	n1, err := svc.ScanCloudSourcesWithOptions(t.Context(), []string{extraSrc.ID}, false, 1)
+	if err != nil || n1 != 0 {
+		t.Fatalf("depth=1 should not descend into date subfolders, got n=%d err=%v", n1, err)
+	}
+	n2, err := svc.ScanCloudSourcesWithOptions(t.Context(), []string{extraSrc.ID}, false, 2)
+	if err != nil || n2 != 2 {
+		t.Fatalf("depth=2 should adopt both subfolder archives, got n=%d err=%v", n2, err)
 	}
 }

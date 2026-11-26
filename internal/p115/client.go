@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"path"
@@ -161,6 +162,15 @@ func (g *Governor) Failure(code string, now time.Time) {
 	}
 }
 
+func (g *Governor) CircuitErr(now time.Time) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if now.Before(g.circuitUntil) {
+		return &AdapterError{Code: "REMOTE_CIRCUIT_OPEN", Step: g.circuitCode}
+	}
+	return nil
+}
+
 func (g *Governor) ResetCircuit() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -181,6 +191,22 @@ func (g *Governor) Stats() map[string]any {
 	}
 }
 
+type cachedFilePage struct {
+	page FilePage
+	at   time.Time
+}
+
+type cachedPath struct {
+	parts []string
+	at    time.Time
+}
+
+const (
+	dirCacheTTL    = 60 * time.Second
+	pathCacheTTL   = 10 * time.Minute
+	maxCacheBucket = 256
+)
+
 type Client struct {
 	cookie     string
 	userAgent  string
@@ -199,6 +225,10 @@ type Client struct {
 	minInterval time.Duration
 
 	folderMu sync.Mutex
+
+	cacheMu   sync.Mutex
+	dirCache  map[string]cachedFilePage // "cid:offset" -> page
+	pathCache map[string]cachedPath     // "cid" -> breadcrumb
 
 	snapMu    sync.Mutex
 	snapAt    time.Time
@@ -232,7 +262,31 @@ func NewClient(cookie string, gov *Governor) (*Client, error) {
 		proAPIBase:  "https://proapi.115.com",
 		lifeAPIBase: "https://lifebehavior.115.com",
 		minInterval: 1 * time.Second,
+		dirCache:    make(map[string]cachedFilePage),
+		pathCache:   make(map[string]cachedPath),
 	}, nil
+}
+
+func (c *Client) InvalidateDirCache(cids ...string) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if len(cids) == 0 {
+		clear(c.dirCache)
+		clear(c.pathCache)
+		return
+	}
+	for _, cid := range cids {
+		if cid == "" {
+			continue
+		}
+		prefix := cid + ":"
+		for k := range c.dirCache {
+			if strings.HasPrefix(k, prefix) {
+				delete(c.dirCache, k)
+			}
+		}
+		delete(c.pathCache, cid)
+	}
 }
 
 func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Values, mutation bool) (map[string]any, error) {
@@ -256,7 +310,11 @@ func (c *Client) doJSONWithCookies(ctx context.Context, method, rawURL string, f
 		case <-timer.C:
 		}
 	}
-	c.nextReqAt = time.Now().Add(c.minInterval)
+	jitter := time.Duration(0)
+	if c.minInterval >= 500*time.Millisecond {
+		jitter = time.Duration(rand.IntN(450)) * time.Millisecond
+	}
+	c.nextReqAt = time.Now().Add(c.minInterval + jitter)
 
 	var bodyReader io.Reader
 	if form != nil {
@@ -382,12 +440,30 @@ func verifyCIDResponse(resp map[string]any, cid string) ([]string, error) {
 }
 
 func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, error) {
+	if err := c.gov.CircuitErr(time.Now()); err != nil {
+		return FilePage{}, err
+	}
+	cacheKey := cid + ":" + strconv.Itoa(offset)
+	c.cacheMu.Lock()
+	if c.dirCache != nil {
+		if entry, ok := c.dirCache[cacheKey]; ok && time.Since(entry.at) < dirCacheTTL {
+			out := FilePage{
+				Files:      append([]CloudFile(nil), entry.page.Files...),
+				NextOffset: entry.page.NextOffset,
+			}
+			c.cacheMu.Unlock()
+			return out, nil
+		}
+	}
+	c.cacheMu.Unlock()
+
 	resp, err := c.fetchFilesJSON(ctx, cid, offset, 115)
 	if err != nil {
 		return FilePage{}, err
 	}
 	// Verify returned breadcrumb path ends with requested CID (prevents silent fallback to root).
-	if _, err := verifyCIDResponse(resp, cid); err != nil {
+	parts, err := verifyCIDResponse(resp, cid)
+	if err != nil {
 		return FilePage{}, err
 	}
 	rawList, ok := resp["data"].([]any)
@@ -423,15 +499,64 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 		n := offset + len(rawList)
 		nextOffset = &n
 	}
-	return FilePage{Files: files, NextOffset: nextOffset}, nil
+	page := FilePage{Files: files, NextOffset: nextOffset}
+
+	now := time.Now()
+	c.cacheMu.Lock()
+	if c.dirCache == nil {
+		c.dirCache = make(map[string]cachedFilePage)
+	}
+	if len(c.dirCache) >= maxCacheBucket {
+		clear(c.dirCache)
+	}
+	c.dirCache[cacheKey] = cachedFilePage{
+		page: FilePage{Files: append([]CloudFile(nil), files...), NextOffset: nextOffset},
+		at:   now,
+	}
+	if c.pathCache == nil {
+		c.pathCache = make(map[string]cachedPath)
+	}
+	if len(c.pathCache) >= maxCacheBucket {
+		clear(c.pathCache)
+	}
+	c.pathCache[cid] = cachedPath{parts: append([]string(nil), parts...), at: now}
+	c.cacheMu.Unlock()
+
+	return page, nil
 }
 
 func (c *Client) DirectoryPath(ctx context.Context, cid string) ([]string, error) {
+	if err := c.gov.CircuitErr(time.Now()); err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	if c.pathCache != nil {
+		if entry, ok := c.pathCache[cid]; ok && time.Since(entry.at) < pathCacheTTL {
+			out := append([]string(nil), entry.parts...)
+			c.cacheMu.Unlock()
+			return out, nil
+		}
+	}
+	c.cacheMu.Unlock()
+
 	resp, err := c.fetchFilesJSON(ctx, cid, 0, 1)
 	if err != nil {
 		return nil, err
 	}
-	return verifyCIDResponse(resp, cid)
+	parts, err := verifyCIDResponse(resp, cid)
+	if err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	if c.pathCache == nil {
+		c.pathCache = make(map[string]cachedPath)
+	}
+	if len(c.pathCache) >= maxCacheBucket {
+		clear(c.pathCache)
+	}
+	c.pathCache[cid] = cachedPath{parts: append([]string(nil), parts...), at: time.Now()}
+	c.cacheMu.Unlock()
+	return parts, nil
 }
 
 func (c *Client) EnsureFolder(ctx context.Context, parentCID, name string) (string, error) {
@@ -476,6 +601,7 @@ func (c *Client) EnsureFolder(ctx context.Context, parentCID, name string) (stri
 	if cid == "" {
 		return "", &AdapterError{Code: "FOLDER_CREATE_UNKNOWN", Uncertain: true}
 	}
+	c.InvalidateDirCache(parentCID)
 	return cid, nil
 }
 
@@ -508,6 +634,9 @@ func (c *Client) MoveVerified(ctx context.Context, loc FileLocator, targetCID st
 	}
 	form := url.Values{"fid[0]": {loc.FID}, "pid": {targetCID}}
 	_, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/move", form, true)
+	if err == nil {
+		c.InvalidateDirCache(loc.CID, targetCID)
+	}
 	return err
 }
 
@@ -517,6 +646,9 @@ func (c *Client) DeleteVerified(ctx context.Context, loc FileLocator) error {
 	}
 	form := url.Values{"fid[0]": {loc.FID}, "ignore_warn": {"1"}}
 	_, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/rb/delete", form, true)
+	if err == nil {
+		c.InvalidateDirCache(loc.CID)
+	}
 	return err
 }
 

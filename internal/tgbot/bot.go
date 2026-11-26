@@ -130,15 +130,13 @@ func (b *Bot) Run(ctx context.Context) {
 
 func (b *Bot) registerCommands(ctx context.Context, cfg notify.TelegramConfig) error {
 	cmds := []map[string]string{
-		{"command": "menu", "description": "打开方舟快捷主控台"},
-		{"command": "status", "description": "查看运行状态、内存与缓存"},
-		{"command": "tasks", "description": "查看最近任务与状态筛选"},
-		{"command": "scan", "description": "手动扫描本地或 115 云目录"},
-		{"command": "clean", "description": "回收缓存、整理日期目录与清空"},
-		{"command": "pause", "description": "暂停后台任务调度"},
-		{"command": "resume", "description": "恢复后台任务调度"},
+		{"command": "menu", "description": "打开方舟主控台"},
+		{"command": "status", "description": "查看运行状态与任务"},
+		{"command": "tasks", "description": "查看最近任务列表"},
+		{"command": "scan", "description": "手动触发目录扫描"},
+		{"command": "clean", "description": "整理昨日目录与缓存维护"},
+		{"command": "settings", "description": "切换解压规则与通知范围"},
 		{"command": "pwd", "description": "追加解压密码（/pwd 密码）"},
-		{"command": "rules", "description": "查看与切换解压归档规则"},
 	}
 	_, err := b.callAPI(ctx, cfg, "setMyCommands", map[string]any{"commands": cmds}, 15*time.Second)
 	return err
@@ -235,7 +233,7 @@ func (b *Bot) handleMessage(ctx context.Context, cfg notify.TelegramConfig, msg 
 			txt, kb := b.renderTasks(ctx, filter)
 			_ = b.sendMessage(ctx, cfg, msg.Chat.ID, txt, kb)
 		case "/scan":
-			txt, kb := b.renderScanMenu()
+			txt, kb := b.renderScanMenu(ctx)
 			_ = b.sendMessage(ctx, cfg, msg.Chat.ID, txt, kb)
 		case "/clean":
 			txt, kb := b.renderCleanMenu(ctx)
@@ -254,7 +252,7 @@ func (b *Bot) handleMessage(ctx context.Context, cfg notify.TelegramConfig, msg 
 			_ = b.sendMessage(ctx, cfg, msg.Chat.ID, "▶️ <b>后台任务调度已恢复</b>\n队列中的任务将继续自动执行。", kb)
 		case "/pwd":
 			b.handlePwdCommand(ctx, cfg, msg.Chat.ID, arg)
-		case "/rules":
+		case "/rules", "/settings":
 			txt, kb := b.renderRules(ctx)
 			_ = b.sendMessage(ctx, cfg, msg.Chat.ID, txt, kb)
 		case "/retry":
@@ -393,8 +391,18 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 
 	case data == "scan":
 		_ = b.answerCallback(ctx, cfg, cb.ID, "")
-		txt, kb := b.renderScanMenu()
+		txt, kb := b.renderScanMenu(ctx)
 		_ = b.editMessage(ctx, cfg, chatID, msgID, txt, kb)
+
+	case data == "confirm_scan:deep":
+		_ = b.answerCallback(ctx, cfg, cb.ID, "")
+		depth := b.pipeline.P115Config().ScanDepth()
+		msg := fmt.Sprintf("⚠️ <b>确认按深度扫描 115 云目录？</b>\n\n当前配置遍历深度：<b>%d 层</b>（可在网页设置 1~5 层）。\n将扫描所有已启用的 115 云监控目录并接管未处理过的压缩包；如只想扫今天的新包，请点「仅扫今日」。", depth)
+		kb := &notify.InlineKeyboardMarkup{InlineKeyboard: [][]notify.InlineButton{
+			{{Text: "✅ 确认按深度扫描", CallbackData: "do_scan:deep"}, {Text: "☁️ 改用仅扫今日", CallbackData: "do_scan:today"}},
+			{{Text: "🔙 返回扫描菜单", CallbackData: "scan"}},
+		}}
+		_ = b.editMessage(ctx, cfg, chatID, msgID, msg, kb)
 
 	case strings.HasPrefix(data, "do_scan:"):
 		target := strings.TrimPrefix(data, "do_scan:")
@@ -408,12 +416,20 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 			} else {
 				msg = fmt.Sprintf("✅ 本地监控目录扫描完成，新接管 <b>%d</b> 个稳定压缩包。", n)
 			}
-		case "cloud":
-			n, err := b.pipeline.ScanCloudSources(ctx, nil)
+		case "today", "cloud":
+			n, err := b.pipeline.ScanCloudSourcesWithOptions(ctx, nil, true, 0)
 			if err != nil {
-				msg = "❌ 115 云监控目录扫描失败：" + html.EscapeString(zhDomainErr(err))
+				msg = "❌ 115 云目录今日扫描失败：" + html.EscapeString(zhDomainErr(err))
 			} else {
-				msg = fmt.Sprintf("✅ 115 云监控目录扫描完成，新接管 <b>%d</b> 个压缩包。", n)
+				msg = fmt.Sprintf("✅ 115 云目录（仅今日模式）扫描完成，新接管 <b>%d</b> 个压缩包。", n)
+			}
+		case "deep":
+			depth := b.pipeline.P115Config().ScanDepth()
+			n, err := b.pipeline.ScanCloudSourcesWithOptions(ctx, nil, false, depth)
+			if err != nil {
+				msg = "❌ 115 云目录深度扫描失败：" + html.EscapeString(zhDomainErr(err))
+			} else {
+				msg = fmt.Sprintf("✅ 115 云目录（深度 %d 层）扫描完成，新接管 <b>%d</b> 个压缩包。", depth, n)
 			}
 		case "life":
 			n, err := b.pipeline.TriggerLifeCheck(ctx)
@@ -448,14 +464,14 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 		_ = b.editMessage(ctx, cfg, chatID, msgID, msg, kb)
 
 	case data == "do_clean:org_preview":
-		_ = b.answerCallback(ctx, cfg, cb.ID, "正在扫描旧日期目录...")
-		plan, err := b.pipeline.PreviewOrganize(ctx)
+		_ = b.answerCallback(ctx, cfg, cb.ID, "正在扫描昨日及以前目录...")
+		plan, err := b.pipeline.PreviewOrganizeWithMode(ctx, true)
 		if err != nil {
 			_ = b.editMessage(ctx, cfg, chatID, msgID, "❌ 扫描预览失败："+html.EscapeString(err.Error()), backHomeKB())
 			return
 		}
 		var sb strings.Builder
-		sb.WriteString("🗂 <b>日期目录整理预览</b>\n")
+		sb.WriteString("🗂 <b>手动整理预览（昨日及以前）</b>\n")
 		sb.WriteString(fmt.Sprintf("• 待折叠归档：<b>%d</b> 个旧日期目录\n• 待清理空壳：<b>%d</b> 个\n", plan.MoveCount, plan.EmptyCount))
 		if plan.SkippedActive > 0 {
 			sb.WriteString(fmt.Sprintf("• 自动避让活跃任务：%d 个\n", plan.SkippedActive))
@@ -481,7 +497,7 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 				sb.WriteString(fmt.Sprintf("…共 %d 项\n", len(plan.Actions)))
 			}
 		} else {
-			sb.WriteString("\n当前没有超过保留期的旧日期目录需要整理。")
+			sb.WriteString("\n当前没有昨日及以前的旧日期目录需要整理。")
 		}
 		rows := [][]notify.InlineButton{}
 		if len(plan.Actions) > 0 {
@@ -492,7 +508,7 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 
 	case data == "do_clean:org_run":
 		_ = b.answerCallback(ctx, cfg, cb.ID, "正在整理...")
-		res, err := b.pipeline.RunOrganize(ctx, false)
+		res, err := b.pipeline.RunOrganizeWithMode(ctx, false, true)
 		msg := "❌ 目录整理失败"
 		if err == nil {
 			msg = fmt.Sprintf("✅ <b>日期目录整理完成</b>\n• 已归并进历史归档：<b>%d</b> 个\n• 已清理空目录：<b>%d</b> 个\n• 跳过活跃任务：%d 个 · 失败：%d 个",
@@ -549,6 +565,19 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 		txt, kb := b.renderRules(ctx)
 		_ = b.editMessage(ctx, cfg, chatID, msgID, txt, kb)
 
+	case strings.HasPrefix(data, "set_notify:"):
+		mode := strings.TrimPrefix(data, "set_notify:")
+		if mode != "errors" && mode != "result" && mode != "all" {
+			_ = b.answerCallback(ctx, cfg, cb.ID, "无效的通知范围")
+			return
+		}
+		cur := b.notifier.LoadTelegram(ctx)
+		cur.Mode = mode
+		_ = b.store.SetSetting(ctx, "notify.telegram", cur, true)
+		_ = b.answerCallback(ctx, cfg, cb.ID, "通知推送范围已切换")
+		txt, kb := b.renderRules(ctx)
+		_ = b.editMessage(ctx, cfg, chatID, msgID, txt, kb)
+
 	case strings.HasPrefix(data, "loc:"):
 		pipeID := strings.TrimPrefix(data, "loc:")
 		p, err := b.pipeline.ConfirmLocalFallback(ctx, pipeID)
@@ -589,23 +618,26 @@ func (b *Bot) handleCallback(ctx context.Context, cfg notify.TelegramConfig, cb 
 
 func (b *Bot) renderMainMenu(ctx context.Context) (string, *notify.InlineKeyboardMarkup) {
 	paused := b.pipeline.IsPaused()
-	schedLabel := "⏸️ 暂停调度"
+	schedLabel := "⏸️ 暂停后台调度"
 	schedState := "🟢 运行中"
 	if paused {
-		schedLabel = "▶️ 恢复调度"
+		schedLabel = "▶️ 恢复后台调度"
 		schedState = "🟡 已暂停"
 	}
 	stats, _ := b.store.MaintenanceStats(ctx, b.dbPath)
 	txt := fmt.Sprintf(
-		"⛵ <b>方舟 · 快捷主控台</b>\n调度状态：%s\n任务概况：进行中 <b>%d</b> · 失败 <b>%d</b> · 已完成 <b>%d</b>\n\n💡 直接向我发送<b>磁链 / 电驴 / 链接</b>、<b>.txt 文件</b>或 <b>.torrent 种子</b>即可提交 115 离线下载。",
+		"⛵ <b>方舟 · 快捷主控台</b>\n"+
+			"━━━━━━━━━━━━━━━\n"+
+			"• 调度状态：%s\n"+
+			"• 任务概况：进行中 <b>%d</b> · 失败 <b>%d</b> · 完成 <b>%d</b>\n\n"+
+			"💡 直接发送<b>磁链 / 电驴 / 链接</b>、<b>.txt 文件</b>或 <b>.torrent 种子</b>即可提交 115 离线。",
 		schedState, stats.ActivePipelines, stats.FailedPipelines, stats.CompletedPipelines,
 	)
 	kb := &notify.InlineKeyboardMarkup{
 		InlineKeyboard: [][]notify.InlineButton{
-			{{Text: "📊 运行状态", CallbackData: "status"}, {Text: "📋 任务列表", CallbackData: "tasks:all"}},
-			{{Text: "🔍 手动扫描", CallbackData: "scan"}, {Text: "🧹 空间与整理", CallbackData: "clean"}},
-			{{Text: schedLabel, CallbackData: "sched:toggle"}, {Text: "⚙️ 解压规则", CallbackData: "rules"}},
-			{{Text: "🔁 一键重试失败项", CallbackData: "retry_all"}},
+			{{Text: "📊 状态与任务", CallbackData: "status"}, {Text: "🔍 触发扫描", CallbackData: "scan"}},
+			{{Text: "🧹 整理与维护", CallbackData: "clean"}, {Text: "⚙️ 规则与通知", CallbackData: "rules"}},
+			{{Text: schedLabel, CallbackData: "sched:toggle"}},
 		},
 	}
 	return txt, kb
@@ -651,8 +683,10 @@ func (b *Bot) renderStatus(ctx context.Context) (string, *notify.InlineKeyboardM
 	)
 	kb := &notify.InlineKeyboardMarkup{
 		InlineKeyboard: [][]notify.InlineButton{
-			{{Text: "🔄 刷新状态", CallbackData: "status"}, {Text: "🧹 空间与整理", CallbackData: "clean"}},
-			{{Text: "🏠 返回主菜单", CallbackData: "menu"}},
+			{{Text: "📋 全部任务", CallbackData: "tasks:all"}, {Text: "⏳ 进行中", CallbackData: "tasks:active"}},
+			{{Text: "⚠️ 待确认", CallbackData: "tasks:attention"}, {Text: "❌ 失败项", CallbackData: "tasks:failed"}},
+			{{Text: "🔄 刷新状态", CallbackData: "status"}, {Text: "🔁 重试全部失败", CallbackData: "retry_all"}},
+			{{Text: "🏠 返回主控台", CallbackData: "menu"}},
 		},
 	}
 	return txt, kb
@@ -726,14 +760,21 @@ func (b *Bot) renderTasks(ctx context.Context, filter string) (string, *notify.I
 	return sb.String(), &notify.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func (b *Bot) renderScanMenu() (string, *notify.InlineKeyboardMarkup) {
-	txt := "🔍 <b>手动触发扫描</b>\n请选择要立即扫描的目标："
+func (b *Bot) renderScanMenu(ctx context.Context) (string, *notify.InlineKeyboardMarkup) {
+	depth := b.pipeline.P115Config().ScanDepth()
+	txt := fmt.Sprintf(
+		"🔍 <b>手动触发扫描</b>\n"+
+			"━━━━━━━━━━━━━━━\n"+
+			"• <b>仅扫今日（推荐）</b>：只进当天日期目录，极低请求数防风控\n"+
+			"• <b>按深度扫描</b>：按当前配置 <b>%d 层</b> 遍历全部云监控目录",
+		depth,
+	)
 	kb := &notify.InlineKeyboardMarkup{
 		InlineKeyboard: [][]notify.InlineButton{
+			{{Text: "☁️ 扫云目录（仅今日）", CallbackData: "do_scan:today"}},
 			{{Text: "📂 扫本地监控目录", CallbackData: "do_scan:local"}},
-			{{Text: "☁️ 扫 115 云监控目录", CallbackData: "do_scan:cloud"}},
-			{{Text: "⚡ 检查 115 生活事件", CallbackData: "do_scan:life"}},
-			{{Text: "🏠 返回主菜单", CallbackData: "menu"}},
+			{{Text: fmt.Sprintf("⚠️ 按深度扫描云目录（%d 层）", depth), CallbackData: "confirm_scan:deep"}},
+			{{Text: "🏠 返回主控台", CallbackData: "menu"}},
 		},
 	}
 	return txt, kb
@@ -743,19 +784,19 @@ func (b *Bot) renderCleanMenu(ctx context.Context) (string, *notify.InlineKeyboa
 	stats, _ := b.store.MaintenanceStats(ctx, b.dbPath)
 	cs := b.pipeline.CacheSummary()
 	txt := fmt.Sprintf(
-		"🧹 <b>空间维护与目录整理</b>\n"+
+		"🧹 <b>整理与空间维护</b>\n"+
+			"━━━━━━━━━━━━━━━\n"+
 			"• 本地下载缓存：<b>%s</b>（%d 个文件）\n"+
 			"• 已结束任务：%d 条完成 / %d 条失败\n"+
 			"• 数据库体积：%s\n\n"+
-			"<code>所有清理操作均自动跳过运行中任务，绝不删真实成品文件</code>",
+			"<code>手动整理将归档昨日及以前的日期目录，活跃任务自动避让</code>",
 		fmtBytes(cs.CacheBytes), cs.CacheFiles, stats.CompletedPipelines, stats.FailedPipelines, fmtBytes(stats.DBBytes),
 	)
 	kb := &notify.InlineKeyboardMarkup{
 		InlineKeyboard: [][]notify.InlineButton{
-			{{Text: "🗑️ 回收本地下载缓存", CallbackData: "do_clean:cache"}},
-			{{Text: "🗂 预览日期目录整理", CallbackData: "do_clean:org_preview"}},
-			{{Text: "🧾 清空已结束任务记录", CallbackData: "do_clean:clear_done"}},
-			{{Text: "🏠 返回主菜单", CallbackData: "menu"}},
+			{{Text: "🗂 整理昨日及以前（预览）", CallbackData: "do_clean:org_preview"}},
+			{{Text: "🗑️ 回收本地缓存", CallbackData: "do_clean:cache"}, {Text: "🧾 清空已结束记录", CallbackData: "do_clean:clear_done"}},
+			{{Text: "🏠 返回主控台", CallbackData: "menu"}},
 		},
 	}
 	return txt, kb
@@ -763,6 +804,7 @@ func (b *Bot) renderCleanMenu(ctx context.Context) (string, *notify.InlineKeyboa
 
 func (b *Bot) renderRules(ctx context.Context) (string, *notify.InlineKeyboardMarkup) {
 	rule := b.pipeline.ArchiveRule(ctx)
+	tgCfg := b.notifier.LoadTelegram(ctx)
 	origMap := map[string]string{
 		"archive": "移入「归档区/原包留存」",
 		"keep":    "保留在原目录不动",
@@ -773,12 +815,19 @@ func (b *Bot) renderRules(ctx context.Context) (string, *notify.InlineKeyboardMa
 		"auto_local":    "自动切换本地 7-Zip 解压",
 		"move_failed":   "移入「归档区/异常待查」",
 	}
+	notifyMap := map[string]string{
+		"errors": "仅异常与待确认",
+		"result": "完成与异常（推荐）",
+		"all":    "全部任务与扫描事件",
+	}
 	txt := fmt.Sprintf(
-		"⚙️ <b>当前解压与归档规则</b>\n"+
-			"• 解压成功后原包：<b>%s</b>\n"+
-			"• 云解压失败策略：<b>%s</b>\n"+
-			"<code>点击下方按钮可一键切换（立即生效）</code>",
-		origMap[rule.OriginalAction], failMap[rule.CloudFailureAction],
+		"⚙️ <b>规则与通知设置</b>\n"+
+			"━━━━━━━━━━━━━━━\n"+
+			"• 解压后原包：<b>%s</b>\n"+
+			"• 云解压失败：<b>%s</b>\n"+
+			"• 通知推送范围：<b>%s</b>\n"+
+			"<code>点击下方按钮一键切换，立即生效</code>",
+		origMap[rule.OriginalAction], failMap[rule.CloudFailureAction], notifyMap[tgCfg.Mode],
 	)
 	mark := func(cur, val, label string) string {
 		if cur == val {
@@ -798,7 +847,12 @@ func (b *Bot) renderRules(ctx context.Context) (string, *notify.InlineKeyboardMa
 				{Text: mark(rule.CloudFailureAction, "auto_local", "自动本地"), CallbackData: "set_fail:auto_local"},
 				{Text: mark(rule.CloudFailureAction, "move_failed", "移入异常"), CallbackData: "set_fail:move_failed"},
 			},
-			{{Text: "🏠 返回主菜单", CallbackData: "menu"}},
+			{
+				{Text: mark(tgCfg.Mode, "errors", "仅异常"), CallbackData: "set_notify:errors"},
+				{Text: mark(tgCfg.Mode, "result", "完成与异常"), CallbackData: "set_notify:result"},
+				{Text: mark(tgCfg.Mode, "all", "全部事件"), CallbackData: "set_notify:all"},
+			},
+			{{Text: "🏠 返回主控台", CallbackData: "menu"}},
 		},
 	}
 	return txt, kb

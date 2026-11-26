@@ -213,6 +213,18 @@ func TestCommandsMenuStatusPausePwdRules(t *testing.T) {
 	if rule.OriginalAction != "delete" || rule.CloudFailureAction != "auto_local" {
 		t.Fatalf("expected updated rule, got %+v", rule)
 	}
+
+	// 6. set_notify:all switches Telegram notification mode
+	bot.ProcessUpdate(ctx, cfg, tgUpdate{
+		CallbackQuery: &tgCallbackQuery{
+			ID:      "cb_notify",
+			Message: &tgMessage{MessageID: 55, Chat: tgChat{ID: 998877}},
+			Data:    "set_notify:all",
+		},
+	})
+	if cur := bot.notifier.LoadTelegram(ctx); cur.Mode != "all" {
+		t.Fatalf("expected telegram mode switched to all, got %q", cur.Mode)
+	}
 }
 
 func TestDirectMagnetTorrentAndTextOfflineImport(t *testing.T) {
@@ -362,7 +374,7 @@ func TestRegisterCommands(t *testing.T) {
 		t.Fatalf("expected setMyCommands, got %q", c.Method)
 	}
 	cmds, _ := c.Body["commands"].([]any)
-	if len(cmds) < 8 {
-		t.Fatalf("expected at least 8 registered commands, got %d", len(cmds))
+	if len(cmds) < 7 {
+		t.Fatalf("expected at least 7 registered commands, got %d", len(cmds))
 	}
 }

@@ -455,6 +455,7 @@ func (s *Server) handleGetP115(w http.ResponseWriter, _ *http.Request) {
 		"cloud_history_cid":      cfg.CloudHistoryCID,
 		"cloud_extract_by_date":  cfg.ExtractByDateEnabled(),
 		"life_monitor_enabled":   cfg.LifeMonitorEnabled,
+		"cloud_scan_depth":       cfg.ScanDepth(),
 		"governor":               s.pipeline.GovernorStats(),
 	})
 }
@@ -483,6 +484,7 @@ func (s *Server) handlePutP115(w http.ResponseWriter, r *http.Request) {
 		"cloud_history_cid":      saved.CloudHistoryCID,
 		"cloud_extract_by_date":  saved.ExtractByDateEnabled(),
 		"life_monitor_enabled":   saved.LifeMonitorEnabled,
+		"cloud_scan_depth":       saved.ScanDepth(),
 	})
 }
 
