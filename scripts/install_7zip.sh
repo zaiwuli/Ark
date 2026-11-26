@@ -24,9 +24,10 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 wget -qO "$TMPDIR/7z.tar.xz" "$URL"
 echo "${SHA256}  $TMPDIR/7z.tar.xz" | sha256sum -c -
-tar -xJf "$TMPDIR/7z.tar.xz" -C "$TMPDIR"
+xz -dc "$TMPDIR/7z.tar.xz" | tar -x -C "$TMPDIR"
 
-install -m 0755 "$TMPDIR/7zz" /usr/local/bin/7zz
+# Use official static build (7zzs) so Alpine runtime needs zero glibc/libstdc++.
+install -m 0755 "$TMPDIR/7zzs" /usr/local/bin/7zz
 mkdir -p /usr/local/share/licenses/7zip
 if [ -f "$TMPDIR/License.txt" ]; then
   install -m 0644 "$TMPDIR/License.txt" /usr/local/share/licenses/7zip/License.txt
