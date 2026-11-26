@@ -29,16 +29,16 @@ func TestBarkCoalescingWindowAndPrefixMatching(t *testing.T) {
 	}
 
 	var fires atomic.Int32
-	var gotSources []string
-	recv := NewReceiver(st, 60*time.Millisecond, func(_ context.Context, sourceIDs []string) {
-		gotSources = append(gotSources, sourceIDs...)
+	var gotTargets []Target
+	recv := NewReceiver(st, 60*time.Millisecond, func(_ context.Context, targets []Target) {
+		gotTargets = append(gotTargets, targets...)
 		fires.Add(1)
 	})
 	defer recv.Stop()
 
 	m1, err := recv.Ingest(t.Context(), Incoming{
 		Title: "离线完成",
-		Body:  "路径：/115open/最近接收/影视/2026-11-26",
+		Body:  "路径：/115open/最近接收/影视/2026-11-26/某电影",
 		Group: "115",
 	})
 	if err != nil || m1.MatchedSourceID != src.ID {
@@ -53,8 +53,8 @@ func TestBarkCoalescingWindowAndPrefixMatching(t *testing.T) {
 	if fires.Load() != 1 {
 		t.Fatalf("expected exactly 1 coalesced trigger, got %d", fires.Load())
 	}
-	if len(gotSources) != 1 || gotSources[0] != src.ID {
-		t.Fatalf("expected matched source IDs [%s], got %v", src.ID, gotSources)
+	if len(gotTargets) != 1 || gotTargets[0].SourceID != src.ID || gotTargets[0].RelativePath != "2026-11-26/某电影" {
+		t.Fatalf("expected matched target relative path '2026-11-26/某电影', got %+v", gotTargets)
 	}
 	msgs, _ := st.ListBarkMessages(t.Context(), 10)
 	if len(msgs) != 2 || msgs[0].Status != "dispatched" {

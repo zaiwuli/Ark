@@ -55,8 +55,16 @@ func main() {
 		StableWindow:     15 * time.Second,
 	})
 	notifier := notify.NewDispatcher(st)
-	barkRecv := bark.NewReceiver(st, bark.DefaultWindowDuration, func(ctx context.Context, sourceIDs []string) {
-		if _, err := pipeSvc.HandleBarkTrigger(ctx, sourceIDs); err != nil {
+	barkRecv := bark.NewReceiver(st, bark.DefaultWindowDuration, func(ctx context.Context, targets []bark.Target) {
+		pts := make([]pipeline.BarkTarget, 0, len(targets))
+		for _, t := range targets {
+			pts = append(pts, pipeline.BarkTarget{
+				SourceID:     t.SourceID,
+				ReportedPath: t.ReportedPath,
+				RelativePath: t.RelativePath,
+			})
+		}
+		if _, err := pipeSvc.HandleBarkTrigger(ctx, pts); err != nil {
 			logger.Warn("bark-triggered cloud check failed", "err", err)
 		}
 	})

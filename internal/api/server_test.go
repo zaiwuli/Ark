@@ -227,12 +227,24 @@ func TestBarkPushAndPasswordsAndLocalScanAPI(t *testing.T) {
 		t.Fatalf("readonly bark expected 401, got %d", rec.Code)
 	}
 
-	// Admin token accepted -> Bark code 200.
+	// Admin token accepted -> Bark code 200 (both /bark/push and /bark/{key} and /bark/{key}/{title}/{body with slashes}).
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/bark/push",
 		bytes.NewBufferString(`{"device_key":"`+adminTok+`","title":"离线完成","body":"路径：/115open/test","group":"115"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin bark expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec2 := httptest.NewRecorder()
+	reqKey := httptest.NewRequest(http.MethodPost, "/bark/"+adminTok, bytes.NewBufferString(`{"title":"完成","body":"路径：/115open/test/sub"}`))
+	reqKey.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec2, reqKey)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("POST /bark/{key} expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/bark/"+adminTok+"/离线完成/路径：/115open/test/a/b", nil))
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("GET /bark/{key}/{rest...} with slashes expected 200, got %d: %s", rec3.Code, rec3.Body.String())
 	}
 
 	// Verify stored in /api/v1/bark/messages.

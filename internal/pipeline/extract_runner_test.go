@@ -201,9 +201,15 @@ func TestCloudSourceScanAndSeedCleanupDiscoverHandoff(t *testing.T) {
 
 	mock := p115.NewMockClient()
 	mock.Listings["watch_cid_1"] = []p115.CloudFile{
-		{FID: "f_p1", CID: "watch_cid_1", Name: "movie.part1.rar", Pickcode: "pc1", Size: 500},
-		{FID: "f_p2", CID: "watch_cid_1", Name: "movie.part2.rar", Pickcode: "pc2", Size: 500},
-		{FID: "f_txt", CID: "watch_cid_1", Name: "readme.txt", Pickcode: "pc3", Size: 10},
+		{FID: "sub_day_cid", CID: "watch_cid_1", Name: "2026-11-26", IsDir: true},
+	}
+	mock.Listings["sub_day_cid"] = []p115.CloudFile{
+		{FID: "sub_rel_cid", CID: "sub_day_cid", Name: "某电影合集", IsDir: true},
+	}
+	mock.Listings["sub_rel_cid"] = []p115.CloudFile{
+		{FID: "f_p1", CID: "sub_rel_cid", Name: "movie.part1.rar", Pickcode: "pc1", Size: 500},
+		{FID: "f_p2", CID: "sub_rel_cid", Name: "movie.part2.rar", Pickcode: "pc2", Size: 500},
+		{FID: "f_txt", CID: "sub_rel_cid", Name: "readme.txt", Pickcode: "pc3", Size: 10},
 	}
 	src, err := st.UpsertSource(t.Context(), store.Source{
 		Name:       "CloudMovies",
@@ -219,10 +225,14 @@ func TestCloudSourceScanAndSeedCleanupDiscoverHandoff(t *testing.T) {
 	svc := NewServiceWithOptions(st, ServiceOptions{Timezone: "Asia/Shanghai", DataDir: dir})
 	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", OfflineRootCID: "off_root", CloudOutputCID: "out_root"})
 
-	// Targeted Bark trigger adopts ONLY primary volume movie.part1.rar (skips part2.rar & readme.txt).
-	adopted, err := svc.HandleBarkTrigger(t.Context(), []string{src.ID})
+	// Targeted Bark trigger walks RelativePath "2026-11-26/某电影合集" and adopts ONLY primary volume movie.part1.rar!
+	adopted, err := svc.HandleBarkTrigger(t.Context(), []BarkTarget{{
+		SourceID:     src.ID,
+		ReportedPath: "/115/movies/2026-11-26/某电影合集",
+		RelativePath: "2026-11-26/某电影合集",
+	}})
 	if err != nil || adopted != 1 {
-		t.Fatalf("expected 1 adopted cloud archive, got %d err=%v", adopted, err)
+		t.Fatalf("expected 1 adopted cloud archive via Bark subpath walk, got %d err=%v", adopted, err)
 	}
 
 	// Seed cleanup with AutoExtract=true hands off to discover -> adopts archive inside seed dir!

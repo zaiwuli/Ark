@@ -67,6 +67,8 @@ const EVENT_KIND_ZH = {
   CLOUD_ROOT_INITIALIZED: '云目录初始化',
   LIFE_MONITOR_CHECK: '生活事件检查',
   BARK_WINDOW_FIRED: 'Bark 窗口触发',
+  BARK_TARGET_CHECKED: 'Bark 定向扫描',
+  BARK_PATH_FAILED: 'Bark 路径解析失败',
   CACHE_RECLAIMED: '缓存回收',
   DATE_ORGANIZED: '日期目录整理',
   RETRIED: '重新入队',

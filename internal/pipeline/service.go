@@ -648,19 +648,74 @@ func (s *Service) runSeedCleanups(ctx context.Context, cloud p115.Port, offlineR
 	return nil
 }
 
-// HandleBarkTrigger runs targeted scans for Bark-matched cloud sources (or all enabled cloud sources if none matched).
-func (s *Service) HandleBarkTrigger(ctx context.Context, sourceIDs []string) (int, error) {
-	adopted, err := s.ScanCloudSources(ctx, sourceIDs)
-	if err != nil {
-		return adopted, err
+type BarkTarget struct {
+	SourceID     string
+	ReportedPath string
+	RelativePath string
+}
+
+// HandleBarkTrigger resolves Bark-reported relative subpaths under matched 115 cloud sources and scans them for archives.
+// When no specific target path matched, falls back to scanning all enabled 115 cloud sources.
+func (s *Service) HandleBarkTrigger(ctx context.Context, targets []BarkTarget) (int, error) {
+	cloud, cfg := s.snapshotCloud()
+	if cloud == nil {
+		return 0, ErrP115NotConfigured
 	}
-	_, cfg := s.snapshotCloud()
+	adopted := 0
+	if len(targets) > 0 {
+		sources, err := s.store.ListSources(ctx, "cloud")
+		if err != nil {
+			return 0, err
+		}
+		byID := make(map[string]store.Source, len(sources))
+		for _, src := range sources {
+			if src.Enabled {
+				byID[src.ID] = src
+			}
+		}
+		rule := s.ArchiveRule(ctx)
+		today := time.Now().In(s.loc).Format("2006-01-02")
+		for _, t := range targets {
+			src, ok := byID[t.SourceID]
+			if !ok {
+				continue
+			}
+			n, err := s.scanBarkTarget(ctx, cloud, cfg, rule, src, t, today)
+			if err != nil {
+				_ = s.store.RecordEvent(ctx, "system", "BARK_PATH_FAILED", "bark",
+					fmt.Sprintf("来源「%s」路径 %s 解析失败：%s", src.Name, displayRelPath(t.RelativePath), err.Error()), false)
+				continue
+			}
+			adopted += n
+			if n > 0 {
+				_ = s.store.RecordEvent(ctx, "system", "BARK_TARGET_CHECKED", "bark",
+					fmt.Sprintf("来源「%s」路径 %s 扫描完成，新接管 %d 个压缩包进入解压队列", src.Name, displayRelPath(t.RelativePath), n), false)
+			} else {
+				_ = s.store.RecordEvent(ctx, "system", "BARK_TARGET_CHECKED", "bark",
+					fmt.Sprintf("来源「%s」路径 %s 扫描完成，未发现新的主压缩包", src.Name, displayRelPath(t.RelativePath)), false)
+			}
+		}
+	} else {
+		n, err := s.ScanCloudSources(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		adopted += n
+	}
+
 	if cfg.LifeMonitorEnabled {
 		if n, lifeErr := s.TriggerLifeCheck(ctx); lifeErr == nil {
 			adopted += n
 		}
 	}
 	return adopted, nil
+}
+
+func displayRelPath(rel string) string {
+	if strings.TrimSpace(rel) == "" {
+		return "/"
+	}
+	return "/" + strings.Trim(rel, "/")
 }
 
 // TriggerLifeCheck runs an incremental 115 life-events scan and adopts newly observed archives in monitored folders.

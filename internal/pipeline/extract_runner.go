@@ -171,7 +171,131 @@ func (s *Service) adoptCloudArchive(ctx context.Context, parentID, sourceID stri
 	return err == nil && created
 }
 
-// ScanCloudSources scans enabled 115 cloud watch sources (optionally restricted to onlySourceIDs)
+func isManagedCloudSkipDir(f p115.CloudFile, cfg P115Settings) bool {
+	if !f.IsDir {
+		return false
+	}
+	if f.FID != "" && (f.FID == cfg.CloudOutputCID || f.FID == cfg.CloudArchiveZoneCID ||
+		f.FID == cfg.CloudArchiveCID || f.FID == cfg.CloudFailedCID || f.FID == cfg.CloudHistoryCID) {
+		return true
+	}
+	switch f.Name {
+	case "归档区", "解压输出", "原包留存", "异常待查", "历史归档":
+		return true
+	}
+	return false
+}
+
+// scanCloudDirRecursive scans startCID and up to maxDepth levels of child directories (bounded to 30 dirs)
+// adopting all primary archives into cloud_archive pipelines.
+func (s *Service) scanCloudDirRecursive(ctx context.Context, cloud p115.Port, cfg P115Settings, rule ArchiveRuleConfig, sourceID, startCID, today string, maxDepth int) (int, error) {
+	type dirItem struct {
+		cid   string
+		depth int
+	}
+	queue := []dirItem{{cid: startCID, depth: 0}}
+	visited := make(map[string]bool)
+	const maxDirsPerScan = 30
+	adopted := 0
+
+	for len(queue) > 0 && len(visited) < maxDirsPerScan {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.cid == "" || visited[cur.cid] {
+			continue
+		}
+		visited[cur.cid] = true
+
+		files, err := listAllCloudFiles(ctx, cloud, cur.cid)
+		if err != nil {
+			if cur.depth == 0 {
+				return adopted, err
+			}
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir {
+				if cur.depth < maxDepth && !isManagedCloudSkipDir(f, cfg) && !visited[f.FID] {
+					queue = append(queue, dirItem{cid: f.FID, depth: cur.depth + 1})
+				}
+				continue
+			}
+			if !extract.IsPrimaryArchiveName(f.Name) {
+				continue
+			}
+			if s.adoptCloudArchive(ctx, "", sourceID, f, today, cfg, rule) {
+				adopted++
+			}
+		}
+	}
+	return adopted, nil
+}
+
+// scanBarkTarget walks the relative path from a matched cloud source's CID down to the exact folder (or archive file)
+// reported in the Bark message, then scans it (plus up to 2 subfolder levels) and creates cloud_archive pipelines.
+func (s *Service) scanBarkTarget(ctx context.Context, cloud p115.Port, cfg P115Settings, rule ArchiveRuleConfig, src store.Source, target BarkTarget, today string) (int, error) {
+	var sc struct {
+		CID string `json:"cid"`
+	}
+	if err := json.Unmarshal([]byte(src.ConfigJSON), &sc); err != nil || strings.TrimSpace(sc.CID) == "" {
+		return 0, errors.New("云监控来源未配置有效 CID")
+	}
+	cid := strings.TrimSpace(sc.CID)
+	rel := strings.Trim(target.RelativePath, "/")
+	if rel != "" {
+		parts := strings.Split(rel, "/")
+		for idx, comp := range parts {
+			comp = strings.TrimSpace(comp)
+			if comp == "" {
+				continue
+			}
+			files, err := listAllCloudFiles(ctx, cloud, cid)
+			if err != nil {
+				return 0, err
+			}
+			var exactDirs, foldDirs []p115.CloudFile
+			for _, f := range files {
+				if !f.IsDir {
+					continue
+				}
+				if f.Name == comp {
+					exactDirs = append(exactDirs, f)
+				} else if strings.EqualFold(f.Name, comp) {
+					foldDirs = append(foldDirs, f)
+				}
+			}
+			chosen := exactDirs
+			if len(chosen) == 0 {
+				chosen = foldDirs
+			}
+			if len(chosen) == 1 {
+				cid = chosen[0].FID
+				continue
+			}
+			if len(chosen) > 1 {
+				return 0, fmt.Errorf("存在多个同名子目录：%s", comp)
+			}
+			// If the final path component is an archive file itself, adopt it directly!
+			if idx == len(parts)-1 {
+				for _, f := range files {
+					if !f.IsDir && (f.Name == comp || strings.EqualFold(f.Name, comp)) {
+						if extract.IsPrimaryArchiveName(f.Name) {
+							if s.adoptCloudArchive(ctx, "", src.ID, f, today, cfg, rule) {
+								return 1, nil
+							}
+							return 0, nil
+						}
+						return 0, nil
+					}
+				}
+			}
+			return 0, fmt.Errorf("未找到子目录或文件：%s", comp)
+		}
+	}
+	return s.scanCloudDirRecursive(ctx, cloud, cfg, rule, src.ID, cid, today, 2)
+}
+
+// ScanCloudSources scans enabled 115 cloud watch sources recursively (up to 3 levels)
 // and enqueues newly discovered primary archive files into cloud_archive pipelines.
 func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) (int, error) {
 	cloud, cfg := s.snapshotCloud()
@@ -194,6 +318,7 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 	today := time.Now().In(s.loc).Format("2006-01-02")
 	adopted := 0
 	scanned := 0
+	failedSources := 0
 
 	for _, src := range sources {
 		if !src.Enabled {
@@ -209,27 +334,22 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 			continue
 		}
 		srcCID := strings.TrimSpace(sc.CID)
-		files, err := listAllCloudFiles(ctx, cloud, srcCID)
+		n, err := s.scanCloudDirRecursive(ctx, cloud, cfg, rule, src.ID, srcCID, today, 3)
 		if err != nil {
+			failedSources++
+			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
+				fmt.Sprintf("扫描云监控目录「%s」(CID=%s)失败：%s", src.Name, srcCID, err.Error()), false)
 			continue
 		}
 		scanned++
-		for _, f := range files {
-			if f.IsDir {
-				continue
-			}
-			if !extract.IsPrimaryArchiveName(f.Name) {
-				continue
-			}
-			if s.adoptCloudArchive(ctx, "", src.ID, f, today, cfg, rule) {
-				adopted++
-			}
-		}
+		adopted += n
 	}
 
-	if adopted > 0 {
-		_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
-			fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), false)
+	if adopted > 0 || (len(onlySourceIDs) == 0 && scanned > 0 && failedSources == 0) {
+		if adopted > 0 {
+			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
+				fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), false)
+		}
 	}
 	return adopted, nil
 }

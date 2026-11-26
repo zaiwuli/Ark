@@ -97,10 +97,10 @@ func (s *Server) registerRoutes() {
 
 	// Bark trigger server endpoints (authenticated via device_key = admin API token)
 	s.mux.HandleFunc("POST /bark/push", s.handleBarkPush)
-	s.mux.HandleFunc("GET /bark/{device_key}/{body}", s.handleBarkPath2)
-	s.mux.HandleFunc("POST /bark/{device_key}/{body}", s.handleBarkPath2)
-	s.mux.HandleFunc("GET /bark/{device_key}/{title}/{body}", s.handleBarkPath3)
-	s.mux.HandleFunc("POST /bark/{device_key}/{title}/{body}", s.handleBarkPath3)
+	s.mux.HandleFunc("GET /bark/{device_key}", s.handleBarkKey)
+	s.mux.HandleFunc("POST /bark/{device_key}", s.handleBarkKey)
+	s.mux.HandleFunc("GET /bark/{device_key}/{rest...}", s.handleBarkWildcard)
+	s.mux.HandleFunc("POST /bark/{device_key}/{rest...}", s.handleBarkWildcard)
 	s.mux.HandleFunc("GET /api/v1/bark/messages", s.requireRole("admin", s.handleListBarkMessages))
 
 	// Unified pipelines & events

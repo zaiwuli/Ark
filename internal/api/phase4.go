@@ -116,21 +116,70 @@ func (s *Server) handleBarkPush(w http.ResponseWriter, r *http.Request) {
 	s.processBark(w, r, req.DeviceKey, bark.Incoming{Title: req.Title, Body: req.Body, Group: req.Group})
 }
 
-func (s *Server) handleBarkPath2(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleBarkKey(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("device_key")
-	body, _ := url.PathUnescape(r.PathValue("body"))
-	s.processBark(w, r, key, bark.Incoming{Body: body, Group: r.URL.Query().Get("group")})
+	in := s.extractBarkFields(r, "")
+	s.processBark(w, r, key, in)
 }
 
-func (s *Server) handleBarkPath3(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleBarkWildcard(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("device_key")
-	title, _ := url.PathUnescape(r.PathValue("title"))
-	body, _ := url.PathUnescape(r.PathValue("body"))
-	s.processBark(w, r, key, bark.Incoming{Title: title, Body: body, Group: r.URL.Query().Get("group")})
+	rest := r.PathValue("rest")
+	in := s.extractBarkFields(r, rest)
+	s.processBark(w, r, key, in)
+}
+
+func (s *Server) extractBarkFields(r *http.Request, rest string) bark.Incoming {
+	var in bark.Incoming
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.Contains(ct, "application/json") {
+		var req struct {
+			Title string `json:"title"`
+			Body  string `json:"body"`
+			Group string `json:"group"`
+		}
+		_ = decodeJSON(r, &req, 128*1024)
+		in.Title, in.Body, in.Group = req.Title, req.Body, req.Group
+	} else if r.Method == http.MethodPost && strings.Contains(ct, "application/x-www-form-urlencoded") {
+		_ = r.ParseForm()
+		in.Title = r.FormValue("title")
+		in.Body = r.FormValue("body")
+		in.Group = r.FormValue("group")
+	}
+	q := r.URL.Query()
+	if in.Title == "" {
+		in.Title = q.Get("title")
+	}
+	if in.Body == "" {
+		in.Body = q.Get("body")
+	}
+	if in.Group == "" {
+		in.Group = q.Get("group")
+	}
+	rest = strings.Trim(rest, "/")
+	if rest != "" {
+		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+			pTitle, _ := url.PathUnescape(rest[:idx])
+			pBody, _ := url.PathUnescape(rest[idx+1:])
+			if in.Title == "" {
+				in.Title = pTitle
+			}
+			if in.Body == "" {
+				in.Body = pBody
+			}
+		} else {
+			pBody, _ := url.PathUnescape(rest)
+			if in.Body == "" {
+				in.Body = pBody
+			}
+		}
+	}
+	return in
 }
 
 func (s *Server) processBark(w http.ResponseWriter, r *http.Request, deviceKey string, in bark.Incoming) {
-	tok, err := s.store.VerifyToken(r.Context(), strings.TrimSpace(deviceKey))
+	deviceKey = strings.TrimSpace(deviceKey)
+	tok, err := s.store.VerifyToken(r.Context(), deviceKey)
 	if err != nil || tok.Role != "admin" {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"code": 401, "message": "invalid or non-admin device_key"})
 		return
@@ -138,6 +187,11 @@ func (s *Server) processBark(w http.ResponseWriter, r *http.Request, deviceKey s
 	if s.bark == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"code": 503, "message": "bark receiver unavailable"})
 		return
+	}
+	// Never persist raw device_key inside message title/body.
+	if deviceKey != "" {
+		in.Title = strings.ReplaceAll(in.Title, deviceKey, "[令牌已隐藏]")
+		in.Body = strings.ReplaceAll(in.Body, deviceKey, "[令牌已隐藏]")
 	}
 	msg, err := s.bark.Ingest(r.Context(), in)
 	if err != nil {
