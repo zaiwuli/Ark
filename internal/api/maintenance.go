@@ -3,91 +3,13 @@ package api
 import (
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 
-	"github.com/zaiwuli/Ark/internal/config"
 	"github.com/zaiwuli/Ark/internal/pipeline"
 	"github.com/zaiwuli/Ark/internal/store"
 )
 
 func (s *Server) cacheDirs() []string {
-	dirs := []string{config.LocalCacheDir(s.cfg.DataDir, s.cfg.WorkDir)}
-	if s.cfg.WorkDir != "" {
-		legacy := filepath.Join(s.cfg.WorkDir, "cache")
-		if legacy != dirs[0] {
-			dirs = append(dirs, legacy)
-		}
-	} else {
-		legacy := filepath.Join(s.cfg.DataDir, "cache")
-		if legacy != dirs[0] {
-			dirs = append(dirs, legacy)
-		}
-	}
-	return dirs
-}
-
-func (s *Server) outputDirs() []string {
-	dirs := []string{config.LocalOutputDir(s.cfg.DataDir, s.cfg.WorkDir)}
-	if s.cfg.WorkDir != "" {
-		legacy := filepath.Join(s.cfg.WorkDir, "output")
-		if legacy != dirs[0] {
-			dirs = append(dirs, legacy)
-		}
-	} else {
-		legacy := filepath.Join(s.cfg.DataDir, "output")
-		if legacy != dirs[0] {
-			dirs = append(dirs, legacy)
-		}
-	}
-	return dirs
-}
-
-func measureDir(root string) (int64, int) {
-	var total int64
-	var files int
-	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if info, iErr := d.Info(); iErr == nil {
-			total += info.Size()
-			files++
-		}
-		return nil
-	})
-	return total, files
-}
-
-func findOrphanStageDirs(outRoot string) []string {
-	var found []string
-	entries, err := os.ReadDir(outRoot)
-	if err != nil {
-		return nil
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		full := filepath.Join(outRoot, name)
-		if strings.HasPrefix(name, ".ark-stage-") || strings.HasPrefix(name, ".ark-squash-") {
-			found = append(found, full)
-			continue
-		}
-		// Also check inside YYYY-MM-DD date folders.
-		if len(name) == 10 && name[4] == '-' && name[7] == '-' {
-			if sub, subErr := os.ReadDir(full); subErr == nil {
-				for _, se := range sub {
-					if se.IsDir() && (strings.HasPrefix(se.Name(), ".ark-stage-") || strings.HasPrefix(se.Name(), ".ark-squash-")) {
-						found = append(found, filepath.Join(full, se.Name()))
-					}
-				}
-			}
-		}
-	}
-	return found
+	return s.pipeline.CacheDirs()
 }
 
 func (s *Server) handleMaintenanceSummary(w http.ResponseWriter, r *http.Request) {
@@ -96,86 +18,21 @@ func (s *Server) handleMaintenanceSummary(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load maintenance stats")
 		return
 	}
-	var cacheBytes int64
-	var cacheFiles int
-	for _, cDir := range s.cacheDirs() {
-		b, f := measureDir(cDir)
-		cacheBytes += b
-		cacheFiles += f
-	}
-	for _, oDir := range s.outputDirs() {
-		for _, orphan := range findOrphanStageDirs(oDir) {
-			b, f := measureDir(orphan)
-			cacheBytes += b
-			cacheFiles += f
-		}
-	}
+	cs := s.pipeline.CacheSummary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stats":       stats,
-		"cache_bytes": cacheBytes,
-		"cache_files": cacheFiles,
+		"cache_bytes": cs.CacheBytes,
+		"cache_files": cs.CacheFiles,
 	})
 }
 
 func (s *Server) handleReclaimCache(w http.ResponseWriter, r *http.Request) {
-	activeIDs, err := s.store.ActiveCachePipelineIDs(r.Context())
+	res, err := s.pipeline.ReclaimCache(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to inspect active tasks")
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to reclaim cache")
 		return
 	}
-	var freedBytes int64
-	var removedItems int
-
-	for _, cacheRoot := range s.cacheDirs() {
-		entries, err := os.ReadDir(cacheRoot)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if activeIDs[e.Name()] {
-				continue
-			}
-			full := filepath.Join(cacheRoot, e.Name())
-			b, f := measureDir(full)
-			if !e.IsDir() {
-				if info, iErr := e.Info(); iErr == nil {
-					b = info.Size()
-					f = 1
-				}
-			}
-			if os.RemoveAll(full) == nil {
-				freedBytes += b
-				if f == 0 {
-					f = 1
-				}
-				removedItems += f
-			}
-		}
-	}
-
-	// Clean orphaned temporary staging directories only if no local extraction is active.
-	if len(activeIDs) == 0 {
-		for _, outRoot := range s.outputDirs() {
-			for _, orphan := range findOrphanStageDirs(outRoot) {
-				b, f := measureDir(orphan)
-				if os.RemoveAll(orphan) == nil {
-					freedBytes += b
-					if f == 0 {
-						f = 1
-					}
-					removedItems += f
-				}
-			}
-		}
-	}
-
-	_ = s.store.RecordEvent(r.Context(), "system", "CACHE_RECLAIMED", "complete",
-		"手动回收本地下载缓存与临时残留目录完成", false)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"freed_bytes":    freedBytes,
-		"removed_items":  removedItems,
-		"skipped_active": len(activeIDs),
-	})
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleClearPipelines(w http.ResponseWriter, r *http.Request) {

@@ -1013,6 +1013,8 @@ async function loadTelegram() {
   document.getElementById('tg-proxy').value = d.proxy_url || '';
   document.getElementById('tg-mode').value = d.mode || 'result';
   document.getElementById('tg-enabled').checked = !!d.enabled;
+  const menuEl = document.getElementById('tg-bot-menu');
+  if (menuEl) menuEl.checked = d.bot_menu_enabled !== false;
   document.getElementById('tg-badge').textContent = d.has_bot_token ? '已保存加密令牌' : '未配置令牌';
   document.getElementById('tg-badge').className = 'badge ' + (d.has_bot_token ? 'badge-ok' : 'badge-muted');
 }
@@ -1020,11 +1022,13 @@ async function saveTelegram(btn) {
   hideAlert('tg-alert');
   btn.disabled = true;
   try {
+    const menuEl = document.getElementById('tg-bot-menu');
     const r = await fetch('/api/v1/settings/telegram', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         enabled: document.getElementById('tg-enabled').checked,
+        bot_menu_enabled: menuEl ? menuEl.checked : true,
         bot_token: document.getElementById('tg-token').value.trim(),
         chat_id: document.getElementById('tg-chat').value.trim(),
         api_base: document.getElementById('tg-base').value.trim(),

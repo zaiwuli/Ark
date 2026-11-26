@@ -17,6 +17,7 @@ import (
 	"github.com/zaiwuli/Ark/internal/notify"
 	"github.com/zaiwuli/Ark/internal/pipeline"
 	"github.com/zaiwuli/Ark/internal/store"
+	"github.com/zaiwuli/Ark/internal/tgbot"
 )
 
 func main() {
@@ -73,6 +74,8 @@ func main() {
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 	go pipeSvc.RunLoop(runCtx, 5*time.Second)
+	tgBot := tgbot.New(st, pipeSvc, notifier, mc, cfg.DBPath())
+	go tgBot.Run(runCtx)
 	mc.MarkStartup("scheduler_ready")
 
 	srv := api.NewServer(cfg, st, mc, pipeSvc, notifier, barkRecv)

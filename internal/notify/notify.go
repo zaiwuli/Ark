@@ -17,12 +17,29 @@ import (
 )
 
 type TelegramConfig struct {
-	Enabled  bool   `json:"enabled"`
-	BotToken string `json:"bot_token"`
-	ChatID   string `json:"chat_id"`
-	APIBase  string `json:"api_base"`  // Optional reverse proxy, defaults to https://api.telegram.org
-	ProxyURL string `json:"proxy_url"` // Optional http/https/socks5 proxy
-	Mode     string `json:"mode"`      // result | errors | all
+	Enabled        bool   `json:"enabled"`
+	BotToken       string `json:"bot_token"`
+	ChatID         string `json:"chat_id"`
+	APIBase        string `json:"api_base"`         // Optional reverse proxy, defaults to https://api.telegram.org
+	ProxyURL       string `json:"proxy_url"`        // Optional http/https/socks5 proxy
+	Mode           string `json:"mode"`             // result | errors | all
+	BotMenuEnabled *bool  `json:"bot_menu_enabled"` // nil defaults to true when Telegram is enabled
+}
+
+func (c TelegramConfig) IsBotMenuEnabled() bool {
+	if c.BotMenuEnabled == nil {
+		return true
+	}
+	return *c.BotMenuEnabled
+}
+
+type InlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+}
+
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineButton `json:"inline_keyboard"`
 }
 
 type WebhookConfig struct {
@@ -43,7 +60,10 @@ type Message struct {
 	Timestamp  int64  `json:"timestamp"`
 }
 
-func buildHTTPClient(proxyURL string) (*http.Client, error) {
+func BuildHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(proxyURL) != "" {
 		u, err := url.Parse(strings.TrimSpace(proxyURL))
@@ -54,8 +74,12 @@ func buildHTTPClient(proxyURL string) (*http.Client, error) {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   20 * time.Second,
+		Timeout:   timeout,
 	}, nil
+}
+
+func buildHTTPClient(proxyURL string) (*http.Client, error) {
+	return BuildHTTPClient(proxyURL, 20*time.Second)
 }
 
 func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
@@ -92,12 +116,38 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 		ts,
 	)
 
-	payload, _ := json.Marshal(map[string]any{
+	bodyObj := map[string]any{
 		"chat_id":                  cfg.ChatID,
 		"text":                     text,
 		"parse_mode":               "HTML",
 		"disable_web_page_preview": true,
-	})
+	}
+	if cfg.IsBotMenuEnabled() && msg.PipelineID != "" && msg.PipelineID != "system" {
+		if msg.Kind == "WAITING_APPROVAL" {
+			bodyObj["reply_markup"] = InlineKeyboardMarkup{
+				InlineKeyboard: [][]InlineButton{
+					{
+						{Text: "转本地 7-Zip 解压", CallbackData: "loc:" + msg.PipelineID},
+						{Text: "重试云解压", CallbackData: "rty:" + msg.PipelineID},
+					},
+					{
+						{Text: "暂停任务", CallbackData: "can:" + msg.PipelineID},
+						{Text: "打开主菜单", CallbackData: "menu"},
+					},
+				},
+			}
+		} else if msg.IsError {
+			bodyObj["reply_markup"] = InlineKeyboardMarkup{
+				InlineKeyboard: [][]InlineButton{
+					{
+						{Text: "立即重试", CallbackData: "rty:" + msg.PipelineID},
+						{Text: "查看失败列表", CallbackData: "tasks:failed"},
+					},
+				},
+			}
+		}
+	}
+	payload, _ := json.Marshal(bodyObj)
 	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", base, cfg.BotToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {

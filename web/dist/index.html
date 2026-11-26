@@ -513,12 +513,14 @@
                   </div>
                   <div class="field" style="justify-content:flex-end;">
                     <label class="check-label"><input id="tg-enabled" type="checkbox" /> 启用 Telegram 推送</label>
+                    <label class="check-label" style="margin-top:8px;"><input id="tg-bot-menu" type="checkbox" checked /> 启用机器人交互菜单（直接发链接/种子离线与按钮操控）</label>
                   </div>
                 </div>
                 <div class="toolbar" style="margin-top:16px;">
                   <button type="button" class="btn btn-primary" onclick="saveTelegram(this)">保存配置</button>
                   <button type="button" class="btn btn-secondary" onclick="testTelegram(this)">发送测试消息</button>
                 </div>
+                <div class="field-help" style="margin-top:10px;">开启交互菜单后，系统会自动向 Telegram 注册 <code>/menu</code>、<code>/status</code>、<code>/tasks</code>、<code>/scan</code>、<code>/clean</code>、<code>/pwd</code>、<code>/rules</code> 等快捷指令，并仅响应上方填写的会话编号（Chat ID）；直接向机器人发送磁力/ed2k/HTTP 链接或 <code>.torrent</code> 文件即可自动提交 115 离线。</div>
               </div>
             </div>
           </div>

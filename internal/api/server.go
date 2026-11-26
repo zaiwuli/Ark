@@ -305,12 +305,13 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 }
 
 type telegramSetting struct {
-	Enabled  bool   `json:"enabled"`
-	BotToken string `json:"bot_token"`
-	ChatID   string `json:"chat_id"`
-	APIBase  string `json:"api_base"`
-	ProxyURL string `json:"proxy_url"`
-	Mode     string `json:"mode"` // "result" | "errors" | "all"
+	Enabled        bool   `json:"enabled"`
+	BotToken       string `json:"bot_token"`
+	ChatID         string `json:"chat_id"`
+	APIBase        string `json:"api_base"`
+	ProxyURL       string `json:"proxy_url"`
+	Mode           string `json:"mode"`             // "result" | "errors" | "all"
+	BotMenuEnabled *bool  `json:"bot_menu_enabled"` // nil defaults to true
 }
 
 func (s *Server) handleGetTelegram(w http.ResponseWriter, r *http.Request) {
@@ -323,13 +324,15 @@ func (s *Server) handleGetTelegram(w http.ResponseWriter, r *http.Request) {
 	if cur.Mode == "" {
 		cur.Mode = "result"
 	}
+	botMenu := cur.BotMenuEnabled == nil || *cur.BotMenuEnabled
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":       cur.Enabled,
-		"has_bot_token": cur.BotToken != "",
-		"chat_id":       cur.ChatID,
-		"api_base":      cur.APIBase,
-		"proxy_url":     cur.ProxyURL,
-		"mode":          cur.Mode,
+		"enabled":          cur.Enabled,
+		"has_bot_token":    cur.BotToken != "",
+		"chat_id":          cur.ChatID,
+		"api_base":         cur.APIBase,
+		"proxy_url":        cur.ProxyURL,
+		"mode":             cur.Mode,
+		"bot_menu_enabled": botMenu,
 	})
 }
 
@@ -343,6 +346,15 @@ func (s *Server) handlePutTelegram(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.store.GetSetting(r.Context(), "notify.telegram", &existing)
 	if strings.TrimSpace(req.BotToken) == "" {
 		req.BotToken = existing.BotToken
+	}
+	if req.BotMenuEnabled == nil {
+		if existing.BotMenuEnabled != nil {
+			v := *existing.BotMenuEnabled
+			req.BotMenuEnabled = &v
+		} else {
+			v := true
+			req.BotMenuEnabled = &v
+		}
 	}
 	req.ChatID = strings.TrimSpace(req.ChatID)
 	req.APIBase = strings.TrimRight(strings.TrimSpace(req.APIBase), "/")
@@ -359,13 +371,14 @@ func (s *Server) handlePutTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"saved":         true,
-		"enabled":       req.Enabled,
-		"has_bot_token": req.BotToken != "",
-		"chat_id":       req.ChatID,
-		"api_base":      req.APIBase,
-		"proxy_url":     req.ProxyURL,
-		"mode":          req.Mode,
+		"saved":            true,
+		"enabled":          req.Enabled,
+		"has_bot_token":    req.BotToken != "",
+		"chat_id":          req.ChatID,
+		"api_base":         req.APIBase,
+		"proxy_url":        req.ProxyURL,
+		"mode":             req.Mode,
+		"bot_menu_enabled": *req.BotMenuEnabled,
 	})
 }
 

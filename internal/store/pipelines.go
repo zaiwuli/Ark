@@ -397,7 +397,7 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 	if err != nil {
 		return Pipeline{}, err
 	}
-	if p.State != "failed" && p.State != "submit_failed" && p.State != "seed_cleanup_failed" && p.State != "cancelled" {
+	if p.State != "failed" && p.State != "submit_failed" && p.State != "seed_cleanup_failed" && p.State != "cancelled" && p.State != "wait_local_confirm" {
 		return Pipeline{}, ErrPipelineBusy
 	}
 	now := time.Now().Unix()
@@ -417,6 +417,16 @@ func (s *Store) RetryPipeline(ctx context.Context, id string) (Pipeline, error) 
 	}
 	p.Attempts = 0
 	p.CancelRequested = false
+	// Clear cloud_retries inside locator_json so manually retried cloud extracts get a fresh automatic retry.
+	if p.Kind == "cloud_archive" && strings.Contains(p.LocatorJSON, "cloud_retries") {
+		var locMap map[string]any
+		if json.Unmarshal([]byte(p.LocatorJSON), &locMap) == nil {
+			delete(locMap, "cloud_retries")
+			if b, err := json.Marshal(locMap); err == nil {
+				p.LocatorJSON = string(b)
+			}
+		}
+	}
 	p.ErrorCode = ""
 	p.ErrorMessage = ""
 	p.WaitReason = ""

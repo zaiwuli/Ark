@@ -59,4 +59,17 @@ func TestTelegramNotificationDeliveryAndModeFilter(t *testing.T) {
 	if len(received) != 1 {
 		t.Fatalf("expected no duplicate send, got %d", len(received))
 	}
+
+	// WAITING_APPROVAL notification should include inline action buttons by default.
+	_ = st.RecordEvent(t.Context(), "pl_wait_1", "WAITING_APPROVAL", "local_fallback", "云解压受限，等待确认本地兜底", true)
+	if err := d.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush approval: %v", err)
+	}
+	if len(received) != 2 {
+		t.Fatalf("expected 2 total telegram sends, got %d", len(received))
+	}
+	rm, ok := received[1]["reply_markup"].(map[string]any)
+	if !ok || rm["inline_keyboard"] == nil {
+		t.Fatalf("expected inline_keyboard on WAITING_APPROVAL notification, got %+v", received[1])
+	}
 }
