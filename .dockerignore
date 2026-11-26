@@ -1,0 +1,17 @@
+.git
+.github
+bin/
+data/
+work/
+design-system/
+deploy/
+.env*
+*.db
+*.db-wal
+*.db-shm
+*.key
+*.exe
+*.out
+*.test
+*_test.go
+README.md

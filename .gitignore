@@ -1,0 +1,26 @@
+# Binaries & build artifacts
+/bin/
+/dist/
+*.exe
+*.out
+*.test
+
+# Local runtime data, test DB & secrets (NEVER commit)
+/data/
+/work/
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+secret.key
+*.key
+
+# Local AI design scratch
+/design-system/
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

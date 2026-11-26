@@ -1,0 +1,25 @@
+services:
+  ark:
+    image: ghcr.io/zaiwuli/ark:latest
+    container_name: ark
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      ARK_DATA_DIR: /config
+      ARK_WORK_DIR: /data
+      ARK_MEM_LIMIT_MB: "48"
+      GOMEMLIMIT: 48MiB
+      GOGC: "50"
+      # 若希望严格锁死 100m 容器硬上限，可将下方 mem_limit 改为 100m 并取消注释下一行：
+      # ARK_EXTRACT_MAX_DICT_MB: "48"
+    volumes:
+      # 请按绿联 NAS 实际共享文件夹路径修改左侧目录，并确保 UID 1000 可写
+      - /volume1/docker/ark:/config
+      - /volume1/downloads/ark:/data
+    ports:
+      - "5656:5656"
+    # 空闲常驻约 15-25MB；256m 仅作大字典 7z 解压瞬时安全垫，解压完即释放
+    mem_reservation: 64m
+    mem_limit: 256m
+    init: true
+    stop_grace_period: 30s

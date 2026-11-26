@@ -1,0 +1,676 @@
+package pipeline
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"path"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/zaiwuli/Ark/internal/cleanup"
+	"github.com/zaiwuli/Ark/internal/extract"
+	"github.com/zaiwuli/Ark/internal/links"
+	"github.com/zaiwuli/Ark/internal/localwatch"
+	"github.com/zaiwuli/Ark/internal/notify"
+	"github.com/zaiwuli/Ark/internal/p115"
+	"github.com/zaiwuli/Ark/internal/store"
+	"github.com/zaiwuli/Ark/internal/torrent"
+)
+
+var (
+	ErrP115NotConfigured = errors.New("115_CONNECTION_REQUIRED")
+	ErrCloudRootRequired = errors.New("CLOUD_ROOT_REQUIRED")
+)
+
+type P115Settings struct {
+	Enabled            bool   `json:"enabled"`
+	Cookie             string `json:"cookie"`
+	CloudRootCID       string `json:"cloud_root_cid"`
+	OfflineRootCID     string `json:"offline_root_cid"`
+	CloudOutputCID     string `json:"cloud_output_cid"`
+	CloudArchiveCID    string `json:"cloud_archive_cid"`
+	CloudFailedCID     string `json:"cloud_failed_cid"`
+	LifeMonitorEnabled bool   `json:"life_monitor_enabled"`
+}
+
+type PipelinePolicy struct {
+	IsTorrent   bool                `json:"is_torrent,omitempty"`
+	SeedCleanup *cleanup.SeedPolicy `json:"seed_cleanup,omitempty"`
+}
+
+type Service struct {
+	store            *store.Store
+	gov              *p115.Governor
+	loc              *time.Location
+	extractor        *extract.Engine
+	localWatcher     *localwatch.Watcher
+	notifier         *notify.Dispatcher
+	dataDir          string
+	workDir          string
+	extractBin       string
+	extractMaxDictMB int
+
+	mu           sync.RWMutex
+	cloud        p115.Port
+	portPinned   bool
+	p115Cfg      P115Settings
+	dateCache    map[string]string // "root:YYYY-MM-DD" -> cid
+	lastLifeRun  int64
+	lastLifeSeen int64
+}
+
+type ServiceOptions struct {
+	Timezone         string
+	DataDir          string
+	WorkDir          string
+	ExtractBin       string
+	ExtractMaxDictMB int
+	StableWindow     time.Duration
+}
+
+func NewService(st *store.Store, tz string) *Service {
+	return NewServiceWithOptions(st, ServiceOptions{Timezone: tz})
+}
+
+func NewServiceWithOptions(st *store.Store, opt ServiceOptions) *Service {
+	loc, err := time.LoadLocation(opt.Timezone)
+	if err != nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	dataDir := opt.DataDir
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	svc := &Service{
+		store:            st,
+		gov:              p115.NewGovernor(600),
+		loc:              loc,
+		extractor:        extract.NewEngine(),
+		localWatcher:     localwatch.NewWatcher(st, opt.WorkDir, opt.StableWindow),
+		notifier:         notify.NewDispatcher(st),
+		dataDir:          dataDir,
+		workDir:          opt.WorkDir,
+		extractBin:       opt.ExtractBin,
+		extractMaxDictMB: opt.ExtractMaxDictMB,
+		dateCache:        make(map[string]string),
+	}
+	_ = svc.ReloadP115(context.Background())
+	return svc
+}
+
+// SetPort injects a custom p115.Port (primarily for tests).
+func (s *Service) SetPort(port p115.Port, cfg P115Settings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cloud = port
+	s.portPinned = port != nil
+	s.p115Cfg = cfg
+	s.dateCache = make(map[string]string)
+}
+
+func (s *Service) GovernorStats() map[string]any {
+	return s.gov.Stats()
+}
+
+func (s *Service) P115Config() P115Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.p115Cfg
+}
+
+func (s *Service) ReloadP115(ctx context.Context) error {
+	var cfg P115Settings
+	found, err := s.store.GetSetting(ctx, "p115.config", &cfg)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.p115Cfg = cfg
+	s.dateCache = make(map[string]string)
+	if s.portPinned {
+		return nil
+	}
+	if found && cfg.Enabled && strings.TrimSpace(cfg.Cookie) != "" {
+		client, err := p115.NewClient(cfg.Cookie, s.gov)
+		if err != nil {
+			s.cloud = nil
+			return err
+		}
+		s.cloud = client
+	} else {
+		s.cloud = nil
+	}
+	return nil
+}
+
+func (s *Service) SaveP115Config(ctx context.Context, incoming P115Settings) (P115Settings, error) {
+	var existing P115Settings
+	_, _ = s.store.GetSetting(ctx, "p115.config", &existing)
+
+	incoming.Cookie = strings.TrimSpace(incoming.Cookie)
+	if incoming.Cookie == "" {
+		incoming.Cookie = existing.Cookie
+	} else {
+		// Saving a cookie automatically enables connection.
+		incoming.Enabled = true
+	}
+	if incoming.CloudRootCID == "" {
+		incoming.CloudRootCID = existing.CloudRootCID
+	}
+	if incoming.OfflineRootCID == "" {
+		incoming.OfflineRootCID = existing.OfflineRootCID
+	}
+	if incoming.CloudOutputCID == "" {
+		incoming.CloudOutputCID = existing.CloudOutputCID
+	}
+	if incoming.CloudArchiveCID == "" {
+		incoming.CloudArchiveCID = existing.CloudArchiveCID
+	}
+	if incoming.CloudFailedCID == "" {
+		incoming.CloudFailedCID = existing.CloudFailedCID
+	}
+
+	if err := s.store.SetSetting(ctx, "p115.config", incoming, true); err != nil {
+		return P115Settings{}, err
+	}
+	if err := s.ReloadP115(ctx); err != nil {
+		return P115Settings{}, err
+	}
+	s.gov.ResetCircuit()
+	return incoming, nil
+}
+
+func (s *Service) InitCloudRoot(ctx context.Context, rootCID string) (P115Settings, error) {
+	rootCID = strings.TrimSpace(rootCID)
+	if rootCID == "" {
+		return P115Settings{}, store.ErrInvalid
+	}
+	cloud, cfg := s.snapshotCloud()
+	if cloud == nil {
+		return P115Settings{}, ErrP115NotConfigured
+	}
+
+	// Verify root CID exists before creating children.
+	if _, err := cloud.DirectoryPath(ctx, rootCID); err != nil {
+		return P115Settings{}, err
+	}
+
+	folders := []struct {
+		target *string
+		name   string
+	}{
+		{&cfg.OfflineRootCID, "离线目录"},
+		{&cfg.CloudOutputCID, "解压目录"},
+		{&cfg.CloudArchiveCID, "归档目录"},
+		{&cfg.CloudFailedCID, "失败目录"},
+	}
+	cfg.CloudRootCID = rootCID
+	for _, f := range folders {
+		cid, err := cloud.EnsureFolder(ctx, rootCID, f.name)
+		if err != nil {
+			return P115Settings{}, err
+		}
+		*f.target = cid
+	}
+	saved, err := s.SaveP115Config(ctx, cfg)
+	if err != nil {
+		return P115Settings{}, err
+	}
+	_ = s.store.RecordEvent(ctx, "system", "CLOUD_ROOT_INITIALIZED", "cloud_monitor",
+		fmt.Sprintf("云根目录(%s)初始化完成：离线=%s 解压=%s 归档=%s 失败=%s",
+			rootCID, saved.OfflineRootCID, saved.CloudOutputCID, saved.CloudArchiveCID, saved.CloudFailedCID), false)
+	return saved, nil
+}
+
+func (s *Service) ImportText(ctx context.Context, tokenID, idemKey, text string, autoExtract bool) (store.BatchResult, error) {
+	if err := s.checkCloudRootReady(); err != nil {
+		return store.BatchResult{}, err
+	}
+	parsed, errs, err := links.Extract(text)
+	if err != nil {
+		return store.BatchResult{}, err
+	}
+	reqHash := hashRequest("text", []byte(text), autoExtract)
+	return s.store.RegisterOfflineBatch(ctx, store.RegisterBatchInput{
+		TokenID:        tokenID,
+		IdempotencyKey: idemKey,
+		RequestHash:    reqHash,
+		TargetDate:     time.Now().In(s.loc).Format("2006-01-02"),
+		AutoExtract:    autoExtract,
+		Links:          parsed,
+		InvalidCount:   len(errs),
+		PolicyJSON:     "{}",
+	})
+}
+
+func (s *Service) ImportTorrent(ctx context.Context, tokenID, idemKey string, raw []byte, autoExtract bool) (store.BatchResult, error) {
+	if err := s.checkCloudRootReady(); err != nil {
+		return store.BatchResult{}, err
+	}
+	link, err := torrent.ParseToMagnet(raw)
+	if err != nil {
+		return store.BatchResult{}, err
+	}
+
+	// Snapshot active seed cleanup rule at upload time so later rule edits don't alter existing tasks.
+	pol := PipelinePolicy{IsTorrent: true}
+	seedRule, err := s.store.GetSeedRule(ctx)
+	if err == nil && seedRule != nil {
+		sp := cleanup.DefaultSeedPolicy()
+		if jsonErr := json.Unmarshal([]byte(seedRule.ConfigJSON), &sp); jsonErr == nil {
+			if valid, vErr := cleanup.ValidatePolicy(sp); vErr == nil {
+				pol.SeedCleanup = &valid
+			}
+		}
+	}
+	polBytes, _ := json.Marshal(pol)
+	reqHash := hashRequest("torrent", raw, autoExtract)
+
+	return s.store.RegisterOfflineBatch(ctx, store.RegisterBatchInput{
+		TokenID:        tokenID,
+		IdempotencyKey: idemKey,
+		RequestHash:    reqHash,
+		TargetDate:     time.Now().In(s.loc).Format("2006-01-02"),
+		AutoExtract:    autoExtract,
+		Links:          []links.Link{link},
+		PolicyJSON:     string(polBytes),
+	})
+}
+
+func (s *Service) checkCloudRootReady() error {
+	cloud, cfg := s.snapshotCloud()
+	if cloud != nil && cfg.OfflineRootCID == "" {
+		return ErrCloudRootRequired
+	}
+	return nil
+}
+
+func (s *Service) snapshotCloud() (p115.Port, P115Settings) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cloud, s.p115Cfg
+}
+
+// RunLoop ticks the background pipeline scheduler until ctx is cancelled.
+func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("pipeline tick error", "err", err)
+			}
+		}
+	}
+}
+
+func (s *Service) Tick(ctx context.Context) error {
+	// 1. Local/NAS directory watch & local extractions run even without 115 configured.
+	if s.localWatcher != nil {
+		_, _ = s.localWatcher.Scan(ctx, time.Now())
+	}
+	if err := s.stepLocalExtractions(ctx); err != nil {
+		return err
+	}
+
+	// 2. Cloud offline, discovery, seed cleanup, cloud extract, and life-event checks.
+	cloud, cfg := s.snapshotCloud()
+	if cloud == nil {
+		return nil
+	}
+	if cfg.OfflineRootCID != "" {
+		if err := s.submitQueued(ctx, cloud, cfg.OfflineRootCID); err != nil {
+			return err
+		}
+		if err := s.pollActive(ctx, cloud); err != nil {
+			return err
+		}
+		if err := s.runSeedCleanups(ctx, cloud, cfg.OfflineRootCID); err != nil {
+			return err
+		}
+		if err := s.discoverOfflineArchives(ctx, cloud, cfg); err != nil {
+			return err
+		}
+	}
+	if err := s.stepCloudArchives(ctx, cloud, cfg); err != nil {
+		return err
+	}
+	if cfg.LifeMonitorEnabled && time.Now().Unix()-s.lastLifeRun >= 1800 {
+		_, _ = s.TriggerLifeCheck(ctx)
+	}
+	if s.notifier != nil {
+		_ = s.notifier.Flush(ctx)
+	}
+	return nil
+}
+
+func (s *Service) resolveDateFolder(ctx context.Context, cloud p115.Port, rootCID, targetDate string) (string, error) {
+	key := rootCID + ":" + targetDate
+	s.mu.RLock()
+	cached := s.dateCache[key]
+	s.mu.RUnlock()
+
+	if cached != "" {
+		if p, err := cloud.DirectoryPath(ctx, cached); err == nil && len(p) >= 2 && p[len(p)-2] == rootCID && p[len(p)-1] == cached {
+			return cached, nil
+		}
+	}
+	cid, err := cloud.EnsureFolder(ctx, rootCID, targetDate)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.dateCache[key] = cid
+	s.mu.Unlock()
+	return cid, nil
+}
+
+func (s *Service) submitQueued(ctx context.Context, cloud p115.Port, offlineRootCID string) error {
+	now := time.Now().Unix()
+	due, err := s.store.ListDuePipelines(ctx, "offline", []string{"queued"}, now, 10)
+	if err != nil || len(due) == 0 {
+		return err
+	}
+
+	// Group by target_date so each batch targets a single daily directory.
+	targetDate := due[0].TargetDate
+	if targetDate == "" {
+		targetDate = time.Now().In(s.loc).Format("2006-01-02")
+	}
+	batch := make([]store.Pipeline, 0, len(due))
+	for _, p := range due {
+		if p.TargetDate == targetDate || p.TargetDate == "" {
+			batch = append(batch, p)
+		}
+	}
+
+	targetCID, err := s.resolveDateFolder(ctx, cloud, offlineRootCID, targetDate)
+	if err != nil {
+		return err
+	}
+
+	urlList := make([]string, 0, len(batch))
+	prepared := make([]store.Pipeline, 0, len(batch))
+	for _, p := range batch {
+		opKey := fmt.Sprintf("offline-submit:%s:%d", p.ID, p.Attempts+1)
+		existing, err := s.store.JournalGet(ctx, opKey)
+		if err != nil {
+			return err
+		}
+		if existing != nil && (existing.Status == "prepared" || existing.Status == "uncertain") {
+			p.State = "submission_unknown"
+			p.Stage = "offline_poll"
+			p.NextRunAt = now + 15
+			_ = s.store.UpdatePipeline(ctx, p)
+			continue
+		}
+		if err := s.store.JournalPrepare(ctx, opKey, p.ID, "offline_submit", map[string]string{"target_cid": targetCID}); err != nil {
+			return err
+		}
+		p.Attempts++
+		p.TargetCID = targetCID
+		p.State = "submitting"
+		_ = s.store.UpdatePipeline(ctx, p)
+		prepared = append(prepared, p)
+		urlList = append(urlList, p.OriginalLink)
+	}
+	if len(prepared) == 0 {
+		return nil
+	}
+
+	submitErr := cloud.SubmitOffline(ctx, urlList, targetCID)
+	for _, p := range prepared {
+		opKey := fmt.Sprintf("offline-submit:%s:%d", p.ID, p.Attempts)
+		if submitErr != nil {
+			var aErr *p115.AdapterError
+			uncertain := errors.As(submitErr, &aErr) && aErr.Uncertain
+			if uncertain {
+				_ = s.store.JournalSetStatus(ctx, opKey, "uncertain")
+				p.State = "submission_unknown"
+				p.Stage = "offline_poll"
+				p.ErrorCode = submitErr.Error()
+				p.NextRunAt = now + 15
+				_ = s.store.UpdatePipeline(ctx, p)
+				_ = s.store.RecordEvent(ctx, p.ID, "SUBMISSION_UNKNOWN", "offline_submit", "提交结果不确定，等待核对："+p.ErrorCode, true)
+			} else {
+				_ = s.store.JournalSetStatus(ctx, opKey, "failed")
+				p.State = "submit_failed"
+				p.Stage = "offline_submit"
+				p.ErrorCode = submitErr.Error()
+				p.NextRunAt = 0
+				_ = s.store.UpdatePipeline(ctx, p)
+				_ = s.store.RecordEvent(ctx, p.ID, "SUBMIT_FAILED", "offline_submit", "离线提交失败："+p.ErrorCode, true)
+			}
+			continue
+		}
+		_ = s.store.JournalSetStatus(ctx, opKey, "completed")
+		p.State = "submitted"
+		p.Stage = "offline_poll"
+		p.ErrorCode = ""
+		p.NextRunAt = now + 15
+		_ = s.store.UpdatePipeline(ctx, p)
+		_ = s.store.RecordEvent(ctx, p.ID, "SUBMITTED", "offline_poll", "已提交至 115，等待离线下载完成", false)
+	}
+	return nil
+}
+
+func (s *Service) pollActive(ctx context.Context, cloud p115.Port) error {
+	now := time.Now().Unix()
+	active, err := s.store.ListDuePipelines(ctx, "offline", []string{"submitted", "downloading", "submission_unknown"}, now, 50)
+	if err != nil || len(active) == 0 {
+		return err
+	}
+
+	snapshot, err := cloud.OfflineSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	byHash := make(map[string]p115.OfflineTask, len(snapshot))
+	byURL := make(map[string]p115.OfflineTask, len(snapshot))
+	for _, t := range snapshot {
+		if t.InfoHash != "" {
+			byHash[strings.ToLower(t.InfoHash)] = t
+		}
+		if t.URL != "" {
+			byURL[t.URL] = t
+		}
+	}
+
+	for _, p := range active {
+		match, found := findOfflineMatch(p, byHash, byURL)
+		if !found {
+			if p.State == "submission_unknown" {
+				// Not present in 115 offline list -> safe to mark submit_failed for retry.
+				p.State = "submit_failed"
+				p.Stage = "offline_submit"
+				p.ErrorCode = "SUBMISSION_NOT_FOUND"
+				p.NextRunAt = 0
+				_ = s.store.UpdatePipeline(ctx, p)
+				_ = s.store.RecordEvent(ctx, p.ID, "SUBMIT_FAILED", "offline_submit", "核对未在 115 离线列表发现，可安全重试", true)
+				continue
+			}
+			// Backoff poll for up to 24h.
+			p.NextRunAt = now + nextPollDelay(now-p.CreatedAt)
+			_ = s.store.UpdatePipeline(ctx, p)
+			continue
+		}
+
+		if match.Name != "" {
+			p.Name = match.Name
+		}
+		switch match.Status {
+		case "success":
+			var pol PipelinePolicy
+			_ = json.Unmarshal([]byte(p.PolicyJSON), &pol)
+			if pol.IsTorrent && pol.SeedCleanup != nil && pol.SeedCleanup.Enabled {
+				p.State = "seed_cleanup"
+				p.Stage = "seed_cleanup"
+				p.NextRunAt = now
+			} else if p.AutoExtract {
+				p.State = "discover"
+				p.Stage = "discover"
+				p.NextRunAt = now
+			} else {
+				p.State = "completed"
+				p.Stage = "complete"
+				p.CompletedAt = &now
+				p.NextRunAt = 0
+			}
+			p.ErrorCode = ""
+			_ = s.store.UpdatePipeline(ctx, p)
+			_ = s.store.RecordEvent(ctx, p.ID, "OFFLINE_SUCCEEDED", p.Stage, "115 离线下载已完成", p.State == "completed")
+
+		case "failed":
+			p.State = "failed"
+			p.Stage = "offline_poll"
+			p.ErrorCode = "REMOTE_OFFLINE_FAILED"
+			p.NextRunAt = 0
+			_ = s.store.UpdatePipeline(ctx, p)
+			_ = s.store.RecordEvent(ctx, p.ID, "FAILED", "offline_poll", "115 离线下载失败", true)
+
+		default:
+			p.State = "downloading"
+			p.Stage = "offline_poll"
+			p.NextRunAt = now + nextPollDelay(now-p.CreatedAt)
+			_ = s.store.UpdatePipeline(ctx, p)
+		}
+	}
+	return nil
+}
+
+func (s *Service) runSeedCleanups(ctx context.Context, cloud p115.Port, offlineRootCID string) error {
+	now := time.Now().Unix()
+	due, err := s.store.ListDuePipelines(ctx, "offline", []string{"seed_cleanup"}, now, 5)
+	if err != nil || len(due) == 0 {
+		return err
+	}
+	eng := cleanup.NewEngine(s.store, cloud)
+	for _, p := range due {
+		var pol PipelinePolicy
+		_ = json.Unmarshal([]byte(p.PolicyJSON), &pol)
+		if pol.SeedCleanup == nil {
+			p.State = "completed"
+			p.Stage = "complete"
+			p.CompletedAt = &now
+			_ = s.store.UpdatePipeline(ctx, p)
+			continue
+		}
+		report, runErr := eng.Run(ctx, p, *pol.SeedCleanup, offlineRootCID)
+		p.OutputJSON = cleanup.EncodeReport(report)
+		if runErr != nil {
+			p.State = "seed_cleanup_failed"
+			p.Stage = "seed_cleanup"
+			p.ErrorCode = "SEED_CLEANUP_FAILED"
+			p.ErrorMessage = report.Error
+			p.NextRunAt = 0
+			_ = s.store.UpdatePipeline(ctx, p)
+			_ = s.store.RecordEvent(ctx, p.ID, "SEED_CLEANUP_FAILED", "seed_cleanup", "种子下载成功，清理失败："+report.Error, true)
+			continue
+		}
+		p.State = "completed"
+		p.Stage = "complete"
+		p.ErrorCode = ""
+		p.ErrorMessage = ""
+		p.CompletedAt = &now
+		p.NextRunAt = 0
+		_ = s.store.UpdatePipeline(ctx, p)
+	}
+	return nil
+}
+
+// TriggerLifeCheck runs an incremental 115 life-events scan and returns newly observed archive count.
+func (s *Service) TriggerLifeCheck(ctx context.Context) (int, error) {
+	cloud, _ := s.snapshotCloud()
+	if cloud == nil {
+		return 0, ErrP115NotConfigured
+	}
+	now := time.Now().Unix()
+	since := s.lastLifeSeen
+	if since == 0 {
+		since = now - 1800
+	}
+	events, err := cloud.LifeEvents(ctx, since)
+	if err != nil {
+		return 0, err
+	}
+	s.lastLifeRun = now
+	maxTime := since
+	archivesFound := 0
+	for _, ev := range events {
+		if ev.Time > maxTime {
+			maxTime = ev.Time
+		}
+		if isArchiveName(ev.Name) {
+			archivesFound++
+		}
+	}
+	s.lastLifeSeen = maxTime
+	_ = s.store.RecordEvent(ctx, "system", "LIFE_MONITOR_CHECK", "cloud_monitor",
+		fmt.Sprintf("生活事件增量检查完成：读取 %d 条，发现压缩包 %d 个", len(events), archivesFound), false)
+	return archivesFound, nil
+}
+
+func findOfflineMatch(p store.Pipeline, byHash, byURL map[string]p115.OfflineTask) (p115.OfflineTask, bool) {
+	if p.InfoHash != "" {
+		if t, ok := byHash[strings.ToLower(p.InfoHash)]; ok {
+			return t, true
+		}
+	}
+	if p.OriginalLink != "" {
+		if t, ok := byURL[p.OriginalLink]; ok {
+			return t, true
+		}
+	}
+	return p115.OfflineTask{}, false
+}
+
+func nextPollDelay(ageSec int64) int64 {
+	switch {
+	case ageSec < 120:
+		return 15
+	case ageSec < 600:
+		return 60
+	case ageSec < 3600:
+		return 180
+	default:
+		return 300
+	}
+}
+
+func isArchiveName(name string) bool {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".iso":
+		return true
+	}
+	return false
+}
+
+func hashRequest(kind string, payload []byte, autoExtract bool) string {
+	h := sha256.New()
+	h.Write([]byte(kind))
+	h.Write([]byte{0})
+	if autoExtract {
+		h.Write([]byte("1"))
+	} else {
+		h.Write([]byte("0"))
+	}
+	h.Write([]byte{0})
+	h.Write(payload)
+	return hex.EncodeToString(h.Sum(nil))
+}

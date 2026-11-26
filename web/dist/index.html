@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Ark 方舟</title>
+  <!-- Icons & iOS Standalone Web App Support -->
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ark 方舟" />
+  <meta id="meta-theme-color" name="theme-color" content="#0b1120" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <!-- Desktop Left Sidebar -->
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <img class="brand-logo" src="/icon.svg" alt="Ark 方舟图标" />
+        <div>
+          <div class="brand-title">Ark 方舟</div>
+          <div id="brand-ver" class="brand-sub">初始化中...</div>
+        </div>
+      </div>
+
+      <nav class="nav-group">
+        <button type="button" class="nav-item active" data-tab="tasks" onclick="switchTab('tasks')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+          <span>任务中心</span>
+          <span id="nav-task-count" class="nav-count">0</span>
+        </button>
+
+        <button type="button" class="nav-item" data-tab="import" onclick="switchTab('import')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          <span>离线导入</span>
+        </button>
+
+        <button type="button" class="nav-item" data-tab="sources" onclick="switchTab('sources')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span>来源与规则</span>
+        </button>
+
+        <button type="button" class="nav-item" data-tab="logs" onclick="switchTab('logs')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <span>工作日志</span>
+        </button>
+
+        <button type="button" class="nav-item" data-tab="settings" onclick="switchTab('settings')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>系统设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button type="button" class="mem-pill" title="查看详细运行状态与内存" onclick="openSettingsStatus()">
+          <div class="mem-pill-top">
+            <span>运行状态与内存</span>
+            <span id="sb-mem-val" class="mem-pill-val">--</span>
+          </div>
+          <div class="progress-track">
+            <div id="sb-mem-fill" class="progress-fill" style="width:12%"></div>
+          </div>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Workspace -->
+    <div class="main-wrap">
+      <header class="topbar">
+        <div class="topbar-left">
+          <img class="mobile-brand-logo" src="/icon.svg" alt="Ark 方舟" />
+          <h1 id="page-title" class="page-title">任务中心</h1>
+          <span class="live-chip">
+            <span id="live-dot" class="live-dot"></span>
+            <span id="live-text">实时同步</span>
+          </span>
+        </div>
+
+        <div class="topbar-actions">
+          <button type="button" id="poll-btn" class="icon-btn" onclick="togglePolling()">暂停刷新</button>
+          <button type="button" class="icon-btn" aria-label="切换深浅色主题" onclick="toggleTheme()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            <span id="theme-label">浅色</span>
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="switchTab('import')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg>
+            <span>新建离线</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- VIEW 1: Task Center -->
+        <section id="view-tasks" class="view active">
+          <div class="toolbar" style="justify-content:space-between;">
+            <div class="sub-tabs" role="tablist" aria-label="任务分类">
+              <button type="button" class="sub-tab active" data-task-kind="" onclick="setTaskKind('', this)">全部任务</button>
+              <button type="button" class="sub-tab" data-task-kind="extract" onclick="setTaskKind('extract', this)">解压任务</button>
+              <button type="button" class="sub-tab" data-task-kind="offline" onclick="setTaskKind('offline', this)">离线任务</button>
+            </div>
+            <div class="toolbar">
+              <button type="button" class="btn btn-secondary btn-sm" onclick="triggerLocalScan(this)">扫描本地目录</button>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="triggerLifeCheck(this)">检查生活事件</button>
+            </div>
+          </div>
+
+          <div class="stat-strip" aria-label="任务统计筛选">
+            <button type="button" class="stat-tile" data-stat="active" onclick="setStatFilter('active')">
+              <div><span class="stat-tile-label">进行中</span><span id="st-active" class="stat-tile-num">0</span></div>
+              <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+            </button>
+            <button type="button" class="stat-tile" data-stat="attention" onclick="setStatFilter('attention')">
+              <div><span class="stat-tile-label">待处理 / 待确认</span><span id="st-attention" class="stat-tile-num">0</span></div>
+              <span class="kpi-icon amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg></span>
+            </button>
+            <button type="button" class="stat-tile" data-stat="failed" onclick="setStatFilter('failed')">
+              <div><span class="stat-tile-label">处理失败</span><span id="st-failed" class="stat-tile-num">0</span></div>
+              <span class="kpi-icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>
+            </button>
+            <button type="button" class="stat-tile" data-stat="completed" onclick="setStatFilter('completed')">
+              <div><span class="stat-tile-label">已完成</span><span id="st-completed" class="stat-tile-num">0</span></div>
+              <span class="kpi-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></span>
+            </button>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="toolbar" style="flex:1;min-width:200px;">
+                <input id="task-search" type="text" placeholder="搜索文件名或任务名称..." style="max-width:300px;height:32px;padding:0 10px;font-size:13px;" oninput="onSearchChange()" />
+                <select id="filter-state" aria-label="按状态筛选" style="width:auto;height:32px;padding:0 10px;font-size:12.5px;" onchange="setStatFilter(this.value, true)">
+                  <option value="">全部状态</option>
+                  <option value="active">进行中</option>
+                  <option value="attention">待确认 / 待核对</option>
+                  <option value="failed">处理失败</option>
+                  <option value="completed">已完成</option>
+                </select>
+              </div>
+              <div class="toolbar">
+                <select id="page-size" aria-label="每页数量" style="width:auto;height:30px;padding:0 8px;font-size:12px;" onchange="onPageSizeChange()">
+                  <option value="20" selected>20 条/页</option>
+                  <option value="50">50 条/页</option>
+                  <option value="100">100 条/页</option>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="loadPipelines()">刷新</button>
+              </div>
+            </div>
+
+            <div class="panel-body-flush">
+              <div style="padding:0 18px;">
+                <div id="tasks-alert" class="alert" role="alert" style="margin-top:12px;">
+                  <span class="alert-text"></span>
+                  <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('tasks-alert')">×</button>
+                </div>
+              </div>
+
+              <!-- Desktop Precision Data Table -->
+              <div class="table-wrap desktop-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>任务名称</th>
+                      <th>状态</th>
+                      <th>大小</th>
+                      <th>时间</th>
+                      <th style="text-align:right;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pipe-tbody"></tbody>
+                </table>
+              </div>
+
+              <!-- Mobile Compact Card List -->
+              <div id="pipe-mobile" class="mobile-list"></div>
+              <div id="pipe-empty" class="empty" style="display:none;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+                <div class="empty-title">暂无匹配的任务记录</div>
+                <div class="field-help" style="margin-top:4px;">可在“离线导入”提交链接/种子，或向本地监控目录放入压缩包</div>
+              </div>
+
+              <div id="pipe-pager" class="pager">
+                <span id="pager-info">共 0 条</span>
+                <div class="toolbar">
+                  <button type="button" id="pg-prev" class="btn btn-secondary btn-sm" onclick="changePage(-1)">上一页</button>
+                  <span id="pager-num" class="mono-num">1 / 1</span>
+                  <button type="button" id="pg-next" class="btn btn-secondary btn-sm" onclick="changePage(1)">下一页</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 2: Unified Single-Card Offline Import -->
+        <section id="view-import" class="view">
+          <div class="panel" id="import-drop-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                <span>离线下载导入</span>
+              </h2>
+              <span class="field-help">直接粘贴链接，或点击左下角上传 .torrent 种子 / .txt 文本</span>
+            </div>
+            <div class="panel-body">
+              <div id="import-alert" class="alert" role="alert">
+                <span class="alert-text"></span>
+                <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('import-alert')">×</button>
+              </div>
+              <div class="field">
+                <label for="imp-text">磁力链接 / 电驴链接 / HTTP / FTP（支持直接拖放种子文件到此区域）</label>
+                <textarea id="imp-text" style="min-height:170px;" placeholder="每行一条链接，单次上限 1000 条，自动去重并按当日建目录"></textarea>
+              </div>
+              <div class="toolbar" style="margin-top:14px;justify-content:space-between;">
+                <div class="toolbar">
+                  <input id="imp-file" type="file" accept=".torrent,.txt" style="display:none;" />
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('imp-file').click()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                    <span>上传种子 / 文本</span>
+                  </button>
+                  <span id="file-chip-wrap" style="display:none;" class="file-chip">
+                    <span id="file-chip-name"></span>
+                    <button type="button" aria-label="移除已选文件" onclick="clearSelectedFile()">×</button>
+                  </span>
+                  <label class="check-label" style="margin-left:4px;"><input id="imp-auto" type="checkbox" checked /> 完成后自动解压</label>
+                </div>
+                <button type="button" id="imp-submit-btn" class="btn btn-primary" onclick="submitUnifiedImport(this)">提交离线任务</button>
+              </div>
+              <div class="field-help" style="margin-top:10px;">种子文件将在本机解析并转换为磁链提交，不上传原种子（上限 2 MiB，自动绑定当前种子清理规则）。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 3: Sources & Rules (Sub-tabs, no dry-run checkbox) -->
+        <section id="view-sources" class="view">
+          <div class="sub-tabs" role="tablist" aria-label="来源与规则分页">
+            <button type="button" class="sub-tab active" data-sub="src-list-pane" onclick="switchSubTab('sources', 'src-list-pane', this)">监控来源</button>
+            <button type="button" class="sub-tab" data-sub="seed-rule-pane" onclick="switchSubTab('sources', 'seed-rule-pane', this)">种子清理规则</button>
+          </div>
+
+          <div id="src-list-pane" class="sub-pane active">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                  <span>监控来源管理</span>
+                </h2>
+              </div>
+              <div class="panel-body">
+                <div id="src-alert" class="alert" role="alert">
+                  <span class="alert-text"></span>
+                  <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('src-alert')">×</button>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="src-name">来源名称</label>
+                    <input id="src-name" type="text" placeholder="例如：绿联下载监控 / 影视云目录" />
+                  </div>
+                  <div class="field">
+                    <label for="src-kind">来源类型</label>
+                    <select id="src-kind">
+                      <option value="local">本地 / NAS 监控目录</option>
+                      <option value="cloud">115 云监测目录</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="src-target">目录路径 或 云目录编号</label>
+                    <input id="src-target" type="text" placeholder="本地填如 /data/watch，云端填 CID 数字" />
+                  </div>
+                  <div class="field">
+                    <label for="src-bark">Bark 定向路径前缀（云来源可选）</label>
+                    <input id="src-bark" type="text" placeholder="例如：/115open/最近接收/影视" />
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:14px;">
+                  <button type="button" class="btn btn-primary" onclick="addSource(this)">添加监控来源</button>
+                </div>
+                <div class="table-wrap" style="margin-top:16px;">
+                  <table>
+                    <thead><tr><th>名称</th><th>类型</th><th>监控位置</th><th>Bark 路径前缀</th><th style="text-align:right;">操作</th></tr></thead>
+                    <tbody id="src-list"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="seed-rule-pane" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                  <span>种子下载后清理规则</span>
+                </h2>
+                <span class="field-help">规则在上传种子时绑定，修改仅影响新上传的种子</span>
+              </div>
+              <div class="panel-body">
+                <div class="toggle-row" style="margin-bottom:16px;">
+                  <label class="check-label"><input id="seed-en" type="checkbox" /> 启用种子下载后自动清理</label>
+                  <label class="check-label"><input id="seed-empty" type="checkbox" checked /> 同步清理空子目录</label>
+                  <label class="check-label"><input id="seed-auto-ext" type="checkbox" /> 保留压缩包原地解压</label>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="seed-mode">文件类型策略</label>
+                    <select id="seed-mode">
+                      <option value="all">不按扩展名清理</option>
+                      <option value="exclude">删除指定扩展名</option>
+                      <option value="include">仅保留指定扩展名</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="seed-exts">扩展名列表（逗号分隔）</label>
+                    <input id="seed-exts" type="text" placeholder=".txt, .nfo, .url, .html" />
+                  </div>
+                  <div class="field">
+                    <label for="seed-kws">删除关键词（逗号分隔，可选）</label>
+                    <input id="seed-kws" type="text" placeholder="广告, 宣传, 推广" />
+                  </div>
+                  <div class="field">
+                    <label for="seed-scope">关键词匹配范围</label>
+                    <select id="seed-scope">
+                      <option value="path">完整相对路径（含文件夹名）</option>
+                      <option value="name">仅文件名</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="seed-min">删除小于此大小的单文件（MB，留空不限）</label>
+                    <input id="seed-min" type="text" placeholder="例如：10" />
+                  </div>
+                  <div class="field">
+                    <label for="seed-max">删除大于此大小的单文件（MB，留空不限）</label>
+                    <input id="seed-max" type="text" placeholder="留空表示不限" />
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:16px;">
+                  <button type="button" class="btn btn-primary" onclick="saveSeedRule(this)">保存清理规则</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 4: Logs (Sub-tabs, 100% Chinese) -->
+        <section id="view-logs" class="view">
+          <div class="toolbar" style="justify-content:space-between;">
+            <div class="sub-tabs" role="tablist" aria-label="日志分页">
+              <button type="button" class="sub-tab active" data-sub="log-events-pane" onclick="switchSubTab('logs', 'log-events-pane', this)">最近运行事件</button>
+              <button type="button" class="sub-tab" data-sub="log-bark-pane" onclick="switchSubTab('logs', 'log-bark-pane', this)">Bark 联动信号</button>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="loadLogs()">刷新日志</button>
+          </div>
+
+          <div id="log-events-pane" class="sub-pane active">
+            <div class="panel">
+              <div class="panel-body-flush">
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>时间</th><th>事件类型</th><th>所属阶段</th><th>详细说明</th><th>通知状态</th></tr></thead>
+                    <tbody id="ev-list"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="log-bark-pane" class="sub-pane">
+            <div class="panel">
+              <div class="panel-body-flush">
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>接收时间</th><th>通知标题</th><th>通知正文</th><th>匹配云来源</th><th>合并状态</th></tr></thead>
+                    <tbody id="bark-list"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 5: Settings (6 clean sub-tabs) -->
+        <section id="view-settings" class="view">
+          <div class="sub-tabs" role="tablist" aria-label="系统设置分页">
+            <button type="button" class="sub-tab active" data-sub="set-p115" onclick="switchSubTab('settings', 'set-p115', this)">115 与云目录</button>
+            <button type="button" class="sub-tab" data-sub="set-tg" onclick="switchSubTab('settings', 'set-tg', this)">Telegram 通知</button>
+            <button type="button" class="sub-tab" data-sub="set-webhook" onclick="switchSubTab('settings', 'set-webhook', this)">通用通知回调</button>
+            <button type="button" class="sub-tab" data-sub="set-pwds" onclick="switchSubTab('settings', 'set-pwds', this)">压缩包密码本</button>
+            <button type="button" class="sub-tab" data-sub="set-tokens" onclick="switchSubTab('settings', 'set-tokens', this)">令牌与外部接入</button>
+            <button type="button" class="sub-tab" data-sub="set-status" onclick="switchSubTab('settings', 'set-status', this)">运行状态与内存</button>
+          </div>
+
+          <div id="set-p115" class="sub-pane active">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                  <span>115 网盘连接与云根目录</span>
+                </h2>
+                <div id="p115-status" class="toolbar"></div>
+              </div>
+              <div class="panel-body">
+                <div id="p115-alert" class="alert" role="alert">
+                  <span class="alert-text"></span>
+                  <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('p115-alert')">×</button>
+                </div>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="p115-cookie">115 登录凭据 Cookie（本地加密保存，保存后自动启用）</label>
+                    <input id="p115-cookie" type="password" placeholder="粘贴完整 Cookie（留空保持原配置不变）" />
+                  </div>
+                  <div class="field">
+                    <label for="p115-root">云根目录编号（CID）</label>
+                    <input id="p115-root" type="text" placeholder="一键自动创建离线、解压、归档、失败 4 个目录" />
+                  </div>
+                  <div class="field" style="justify-content:flex-end;">
+                    <label class="check-label"><input id="p115-life" type="checkbox" /> 启用 30 分钟生活事件增量监测</label>
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:16px;">
+                  <button type="button" class="btn btn-primary" onclick="saveP115(this)">保存连接</button>
+                  <button type="button" class="btn btn-secondary" onclick="initCloudRoot(this)">一键初始化云根目录</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-tg" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                  <span>Telegram 机器人通知</span>
+                </h2>
+                <span id="tg-badge" class="badge badge-muted">未配置</span>
+              </div>
+              <div class="panel-body">
+                <div id="tg-alert" class="alert" role="alert">
+                  <span class="alert-text"></span>
+                  <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('tg-alert')">×</button>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="tg-token">机器人令牌（Bot Token）</label>
+                    <input id="tg-token" type="password" placeholder="留空保持不变" />
+                  </div>
+                  <div class="field">
+                    <label for="tg-chat">接收会话编号（Chat ID）</label>
+                    <input id="tg-chat" type="text" placeholder="个人或群组编号" />
+                  </div>
+                  <div class="field">
+                    <label for="tg-base">自定义反代接口地址（国内环境可选）</label>
+                    <input id="tg-base" type="url" placeholder="默认官方接口 https://api.telegram.org" />
+                  </div>
+                  <div class="field">
+                    <label for="tg-proxy">网络代理地址（可选）</label>
+                    <input id="tg-proxy" type="text" placeholder="例如 http:// 或 socks5://127.0.0.1:7890" />
+                  </div>
+                  <div class="field">
+                    <label for="tg-mode">推送事件范围</label>
+                    <select id="tg-mode">
+                      <option value="result">仅推送完成与异常（推荐）</option>
+                      <option value="errors">仅推送异常与待确认</option>
+                      <option value="all">推送全部任务事件</option>
+                    </select>
+                  </div>
+                  <div class="field" style="justify-content:flex-end;">
+                    <label class="check-label"><input id="tg-enabled" type="checkbox" /> 启用 Telegram 推送</label>
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:16px;">
+                  <button type="button" class="btn btn-primary" onclick="saveTelegram(this)">保存配置</button>
+                  <button type="button" class="btn btn-secondary" onclick="testTelegram(this)">发送测试消息</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-webhook" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></svg>
+                  <span>通用回调通知（Webhook）</span>
+                </h2>
+              </div>
+              <div class="panel-body">
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="wh-url">回调接收地址</label>
+                    <input id="wh-url" type="url" placeholder="https://example.com/webhook" />
+                  </div>
+                  <div class="field">
+                    <label for="wh-secret">校验密钥请求头（可选）</label>
+                    <input id="wh-secret" type="password" placeholder="留空保持不变" />
+                  </div>
+                  <div class="field">
+                    <label for="wh-mode">推送事件范围</label>
+                    <select id="wh-mode">
+                      <option value="result">仅推送完成与异常</option>
+                      <option value="errors">仅推送异常</option>
+                      <option value="all">推送全部事件</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:16px;justify-content:space-between;">
+                  <label class="check-label"><input id="wh-enabled" type="checkbox" /> 启用通用回调通知</label>
+                  <button type="button" class="btn btn-primary" onclick="saveWebhook(this)">保存配置</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-pwds" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  <span>压缩包密码候选库</span>
+                </h2>
+              </div>
+              <div class="panel-body">
+                <div class="field">
+                  <label for="pwd-list">常用解压密码（每行一个，云解压与本地 7-Zip 共用，本地加密保存）</label>
+                  <textarea id="pwd-list" style="min-height:160px;" placeholder="每行输入一个常用解压密码，保存时自动去重"></textarea>
+                </div>
+                <div class="toolbar" style="margin-top:14px;">
+                  <button type="button" class="btn btn-primary" onclick="savePasswords(this)">保存密码本</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-tokens" class="sub-pane">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                  <span>接口令牌与外部接入</span>
+                </h2>
+              </div>
+              <div class="panel-body">
+                <div id="tok-alert" class="alert" role="alert">
+                  <span class="alert-text"></span>
+                  <button type="button" class="alert-close" aria-label="关闭提示" onclick="hideAlert('tok-alert')">×</button>
+                </div>
+                <div class="form-grid" style="margin-bottom:14px;">
+                  <div class="copy-box">
+                    <span>离线接口：<strong id="api-import-endpoint"></strong></span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="copyText('api-import-endpoint')">复制</button>
+                  </div>
+                  <div class="copy-box">
+                    <span>Bark 地址：<strong id="bark-endpoint"></strong></span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="copyText('bark-endpoint')">复制</button>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="tok-name">令牌名称</label>
+                    <input id="tok-name" type="text" placeholder="例如：苹果快捷指令 / Bark 联动" />
+                  </div>
+                  <div class="field">
+                    <label for="tok-role">权限级别</label>
+                    <select id="tok-role">
+                      <option value="admin">操作权限（支持提交离线与 Bark 联动）</option>
+                      <option value="readonly">只读权限（仅可查看状态）</option>
+                    </select>
+                  </div>
+                  <div class="field span-2">
+                    <label for="tok-note">备注（可选）</label>
+                    <input id="tok-note" type="text" placeholder="记录使用设备或用途" />
+                  </div>
+                </div>
+                <div class="toolbar" style="margin-top:12px;">
+                  <button type="button" class="btn btn-primary" onclick="createToken(this)">生成新令牌</button>
+                </div>
+                <div id="new-token-wrap" class="copy-box" style="display:none;margin-top:12px;">
+                  <span>新令牌（仅展示本次）：<strong id="new-token-val"></strong></span>
+                  <button type="button" class="btn btn-primary btn-sm" onclick="copyText('new-token-val')">复制令牌</button>
+                </div>
+                <div class="table-wrap" style="margin-top:16px;">
+                  <table>
+                    <thead><tr><th>名称</th><th>权限</th><th>前缀</th><th>备注</th><th style="text-align:right;">操作</th></tr></thead>
+                    <tbody id="tok-list"></tbody>
+                  </table>
+                </div>
+                <details class="details-box">
+                  <summary>苹果快捷指令 & Bark 联动接入说明</summary>
+                  <ol>
+                    <li><strong>快捷指令 / 外部提交</strong>：向「离线接口」发 POST 请求，请求头填 <code>Authorization: Bearer 你的操作令牌</code>，正文 JSON 填 <code>{"text":"链接","auto_extract":true}</code>。</li>
+                    <li><strong>Bark 联动</strong>：发送端 Bark 服务器填「Bark 地址」，设备 Key 填操作权限令牌，并在「来源与规则」中配置云目录路径前缀。</li>
+                  </ol>
+                </details>
+              </div>
+            </div>
+          </div>
+
+          <div id="set-status" class="sub-pane">
+            <div class="kpi-grid">
+              <div class="kpi-card">
+                <div class="kpi-head">
+                  <span>进程常驻内存</span>
+                  <span class="kpi-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+                </div>
+                <div id="kpi-mem" class="kpi-value">--</div>
+                <div id="kpi-mem-sub" class="kpi-meta">--</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-head">
+                  <span>容器内存用量</span>
+                  <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/></svg></span>
+                </div>
+                <div id="kpi-cgroup" class="kpi-value">--</div>
+                <div id="kpi-cgroup-sub" class="kpi-meta">--</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-head">
+                  <span>本地解压引擎</span>
+                  <span class="kpi-icon amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/></svg></span>
+                </div>
+                <div id="kpi-7z" class="kpi-value">--</div>
+                <div id="kpi-7z-sub" class="kpi-meta">--</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-head">
+                  <span>服务在线时长</span>
+                  <span class="kpi-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+                </div>
+                <div id="kpi-up" class="kpi-value">--</div>
+                <div id="kpi-up-sub" class="kpi-meta">--</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- iOS PWA Bottom Tab Bar (Mobile Only) -->
+  <nav class="mobile-tabbar" aria-label="移动端主导航">
+    <button type="button" class="m-tab active" data-tab="tasks" onclick="switchTab('tasks')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+      <span>任务</span>
+    </button>
+    <button type="button" class="m-tab" data-tab="import" onclick="switchTab('import')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+      <span>导入</span>
+    </button>
+    <button type="button" class="m-tab" data-tab="sources" onclick="switchTab('sources')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <span>来源</span>
+    </button>
+    <button type="button" class="m-tab" data-tab="logs" onclick="switchTab('logs')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      <span>日志</span>
+    </button>
+    <button type="button" class="m-tab" data-tab="settings" onclick="switchTab('settings')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+
+  <!-- Slide-Over Detail Drawer (Desktop right / Mobile bottom sheet) -->
+  <div id="drawer-mask" class="drawer-mask" onclick="closeDetail()"></div>
+  <aside id="detail-drawer" class="detail-drawer" aria-label="任务详情">
+    <div class="drawer-head">
+      <h3>任务详情与处理时间线</h3>
+      <button type="button" class="btn btn-ghost btn-sm" aria-label="关闭详情" onclick="closeDetail()">关闭</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
