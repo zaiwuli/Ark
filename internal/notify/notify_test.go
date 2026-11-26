@@ -73,3 +73,53 @@ func TestTelegramNotificationDeliveryAndModeFilter(t *testing.T) {
 		t.Fatalf("expected inline_keyboard on WAITING_APPROVAL notification, got %+v", received[1])
 	}
 }
+
+func TestNotificationModesDistinctTiers(t *testing.T) {
+	var sentTexts []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if txt, ok := body["text"].(string); ok {
+			sentTexts = append(sentTexts, txt)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ts.Close()
+
+	runMode := func(mode string) []string {
+		sentTexts = nil
+		dir := t.TempDir()
+		st, err := store.Open(filepath.Join(dir, "ark.db"), filepath.Join(dir, "secret.key"), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		_ = st.SetSetting(t.Context(), "notify.telegram", TelegramConfig{
+			Enabled:  true,
+			BotToken: "123:tok",
+			ChatID:   "999",
+			APIBase:  ts.URL,
+			Mode:     mode,
+		}, true)
+		_ = st.RecordEvent(t.Context(), "system", "BARK_TARGET_CHECKED", "bark", "Bark 扫到 1 个新包", true)
+		_ = st.RecordEvent(t.Context(), "pl_ok", "SUCCEEDED", "complete", "解压成功", true)
+		_ = st.RecordEvent(t.Context(), "system", "BARK_PATH_FAILED", "bark", "路径解析失败", true)
+
+		d := NewDispatcher(st)
+		if err := d.Flush(t.Context()); err != nil {
+			t.Fatalf("Flush(%s): %v", mode, err)
+		}
+		return append([]string(nil), sentTexts...)
+	}
+
+	if got := runMode("errors"); len(got) != 1 || !strings.Contains(got[0], "Bark 路径解析失败") {
+		t.Fatalf("errors mode should only send error tier, got %+v", got)
+	}
+	if got := runMode("result"); len(got) != 2 {
+		t.Fatalf("result mode should send result + error tiers (2), got %d: %+v", len(got), got)
+	}
+	if got := runMode("all"); len(got) != 3 {
+		t.Fatalf("all mode should send progress + result + error tiers (3), got %d: %+v", len(got), got)
+	}
+}

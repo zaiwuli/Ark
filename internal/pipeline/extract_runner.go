@@ -133,7 +133,7 @@ func (s *Service) ConfirmLocalFallback(ctx context.Context, pipelineID string) (
 	if err := s.store.UpdatePipeline(ctx, p); err != nil {
 		return store.Pipeline{}, err
 	}
-	_ = s.store.RecordEvent(ctx, p.ID, "LOCAL_FALLBACK_APPROVED", "cache", "已确认本地兜底，准备通过 115 直链缓存原包", false)
+	_ = s.store.RecordEvent(ctx, p.ID, "LOCAL_FALLBACK_APPROVED", "cache", "已确认本地兜底，准备通过 115 直链缓存原包", true)
 	return p, nil
 }
 
@@ -338,7 +338,7 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 		if err != nil {
 			failedSources++
 			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
-				fmt.Sprintf("扫描云监控目录「%s」(CID=%s)失败：%s", src.Name, srcCID, err.Error()), false)
+				fmt.Sprintf("扫描云监控目录「%s」(CID=%s)失败：%s", src.Name, srcCID, err.Error()), true)
 			continue
 		}
 		scanned++
@@ -348,7 +348,7 @@ func (s *Service) ScanCloudSources(ctx context.Context, onlySourceIDs []string) 
 	if adopted > 0 || (len(onlySourceIDs) == 0 && scanned > 0 && failedSources == 0) {
 		if adopted > 0 {
 			_ = s.store.RecordEvent(ctx, "system", "CLOUD_SOURCE_SCANNED", "cloud_monitor",
-				fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), false)
+				fmt.Sprintf("已扫描 %d 个 115 云监控目录，新接管 %d 个压缩包进入云解压", scanned, adopted), true)
 		}
 	}
 	return adopted, nil
@@ -402,7 +402,7 @@ func (s *Service) discoverOfflineArchives(ctx context.Context, cloud p115.Port, 
 			p.CompletedAt = &now
 			p.NextRunAt = 0
 			_ = s.store.UpdatePipeline(ctx, p)
-			_ = s.store.RecordEvent(ctx, p.ID, "ARCHIVE_HANDOFF", "complete", fmt.Sprintf("已发现 %d 个压缩包并转交云解压", adopted), false)
+			_ = s.store.RecordEvent(ctx, p.ID, "ARCHIVE_HANDOFF", "complete", fmt.Sprintf("已发现 %d 个压缩包并转交云解压", adopted), true)
 		} else {
 			p.Attempts++
 			if p.Attempts >= 2 {
@@ -581,7 +581,7 @@ func (s *Service) stepCloudArchives(ctx context.Context, cloud p115.Port, cfg P1
 			p.Stage = "cloud_progress"
 			p.NextRunAt = now + 5
 			_ = s.store.UpdatePipeline(ctx, p)
-			_ = s.store.RecordEvent(ctx, p.ID, "CLOUD_EXPORT_STARTED", "cloud_progress", "已提交 115 云解压导出", false)
+			_ = s.store.RecordEvent(ctx, p.ID, "CLOUD_EXPORT_STARTED", "cloud_progress", "已提交 115 云解压导出", true)
 
 		case "cloud_progress":
 			st, err := cloud.ExtractStatus(ctx, p.RemoteID)
@@ -657,7 +657,7 @@ func (s *Service) handleCloudFailure(ctx context.Context, cloud p115.Port, cfg P
 		p.NextRunAt = now + 15
 		_ = s.store.UpdatePipeline(ctx, p)
 		_ = s.store.RecordEvent(ctx, p.ID, "CLOUD_EXTRACT_RETRIED", "cloud_prepare",
-			msg+"，15 秒后自动重试（第 1/1 次）", false)
+			msg+"，15 秒后自动重试（第 1/1 次）", true)
 		return
 	}
 
@@ -669,7 +669,7 @@ func (s *Service) handleCloudFailure(ctx context.Context, cloud p115.Port, cfg P
 		p.ErrorCode = code
 		p.ErrorMessage = msg
 		_ = s.store.UpdatePipeline(ctx, p)
-		_ = s.store.RecordEvent(ctx, p.ID, "AUTO_LOCAL_FALLBACK", "cache", msg+"，已自动切换本地兜底解压", false)
+		_ = s.store.RecordEvent(ctx, p.ID, "AUTO_LOCAL_FALLBACK", "cache", msg+"，已自动切换本地兜底解压", true)
 	case "move_failed":
 		note := ""
 		if cloud != nil && cfg.CloudFailedCID != "" && loc.FID != "" {
@@ -874,7 +874,7 @@ func (s *Service) stepLocalExtractions(ctx context.Context) error {
 	}
 	finalOutDir := filepath.Join(outRoot, targetDate, baseName)
 
-	_ = s.store.RecordEvent(ctx, p.ID, "LOCAL_EXTRACT_STARTED", "local_extract", "开始本地解压："+p.Name, false)
+	_ = s.store.RecordEvent(ctx, p.ID, "LOCAL_EXTRACT_STARTED", "local_extract", "开始本地解压："+p.Name, true)
 	res, err := s.extractor.Extract(ctx, extract.Options{
 		Binary:           s.extractBin,
 		Source:           srcPath,

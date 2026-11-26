@@ -584,7 +584,7 @@ func (s *Store) CreateLocalArchivePipeline(ctx context.Context, in LocalArchiveI
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		_ = s.RecordEvent(ctx, id, "DISCOVERED", "local_extract", "本地监控发现稳定压缩包："+in.Name, false)
+		_ = s.RecordEvent(ctx, id, "DISCOVERED", "local_extract", "本地监控发现稳定压缩包："+in.Name, true)
 		return true, nil
 	}
 	return false, nil
@@ -606,7 +606,7 @@ func (s *Store) CreateCloudArchivePipeline(ctx context.Context, parentID, source
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		_ = s.RecordEvent(ctx, id, "DISCOVERED", "cloud_prepare", "发现云端压缩包，准备云解压："+name, false)
+		_ = s.RecordEvent(ctx, id, "DISCOVERED", "cloud_prepare", "发现云端压缩包，准备云解压："+name, true)
 		return id, true, nil
 	}
 	return "", false, nil

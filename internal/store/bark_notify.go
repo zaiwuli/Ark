@@ -49,6 +49,13 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID int64) error {
 	return err
 }
 
+func (s *Store) MarkNotificationSkipped(ctx context.Context, eventID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE task_events SET notify_status = 'none', notify_error = '' WHERE id = ?
+	`, eventID)
+	return err
+}
+
 func (s *Store) MarkNotificationRetryOrFail(ctx context.Context, eventID int64, errMsg string) error {
 	var attempts int
 	if err := s.db.QueryRowContext(ctx, `SELECT notify_attempts FROM task_events WHERE id = ?`, eventID).Scan(&attempts); err != nil {

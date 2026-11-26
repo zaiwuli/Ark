@@ -159,7 +159,7 @@ func (r *Receiver) fireWindow(winID string) {
 		msg += "，定向路径 " + itoa(len(targets)) + " 组"
 	}
 	msg += "）"
-	_ = r.store.RecordEvent(ctx, "system", "BARK_WINDOW_FIRED", "bark", msg, false)
+	_ = r.store.RecordEvent(ctx, "system", "BARK_WINDOW_FIRED", "bark", msg, true)
 	if cb != nil {
 		cb(ctx, targets)
 	}

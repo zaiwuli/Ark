@@ -194,14 +194,28 @@ func SendWebhook(ctx context.Context, cfg WebhookConfig, msg Message) error {
 	return nil
 }
 
-func shouldSend(mode string, isError bool) bool {
+func eventTier(kind string) string {
+	switch {
+	case strings.Contains(kind, "FAILED") || kind == "SUBMISSION_UNKNOWN" || kind == "WAITING_APPROVAL" || kind == "ARCHIVE_MOVE_WARN":
+		return "error"
+	case kind == "SUCCEEDED" || kind == "OFFLINE_SUCCEEDED" || kind == "NO_ARCHIVE_FOUND" || kind == "SEED_CLEANUP_COMPLETED" || kind == "DATE_ORGANIZED" || kind == "TEST":
+		return "result"
+	default:
+		return "progress"
+	}
+}
+
+func shouldSend(mode, kind string) bool {
+	tier := eventTier(kind)
 	switch mode {
 	case "errors":
-		return isError
-	case "all", "result", "":
+		return tier == "error"
+	case "all":
 		return true
+	case "result", "":
+		return tier == "error" || tier == "result"
 	default:
-		return true
+		return tier == "error" || tier == "result"
 	}
 }
 
@@ -253,39 +267,56 @@ func (d *Dispatcher) Flush(ctx context.Context) error {
 	for _, ev := range events {
 		msg := toMessage(ev)
 		var firstErr error
-		if tgCfg.Enabled && shouldSend(tgCfg.Mode, msg.IsError) {
+		attempted := false
+		if tgCfg.Enabled && shouldSend(tgCfg.Mode, ev.Kind) {
+			attempted = true
 			if err := SendTelegram(ctx, tgCfg, msg); err != nil {
 				firstErr = err
 			}
 		}
-		if whCfg.Enabled && shouldSend(whCfg.Mode, msg.IsError) {
+		if whCfg.Enabled && shouldSend(whCfg.Mode, ev.Kind) {
+			attempted = true
 			if err := SendWebhook(ctx, whCfg, msg); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
 		if firstErr != nil {
 			_ = d.store.MarkNotificationRetryOrFail(ctx, ev.ID, firstErr.Error())
-		} else {
+		} else if attempted {
 			_ = d.store.MarkNotificationSent(ctx, ev.ID)
+		} else {
+			_ = d.store.MarkNotificationSkipped(ctx, ev.ID)
 		}
 	}
 	return nil
 }
 
 func toMessage(ev store.TaskEvent) Message {
-	isErr := strings.Contains(ev.Kind, "FAILED") || ev.Kind == "SUBMISSION_UNKNOWN" || ev.Kind == "WAITING_APPROVAL"
+	isErr := eventTier(ev.Kind) == "error"
 	titleMap := map[string]string{
-		"SUCCEEDED":             "解压完成",
-		"OFFLINE_SUCCEEDED":     "离线完成",
+		"SUCCEEDED":              "解压完成",
+		"OFFLINE_SUCCEEDED":      "离线完成",
 		"SEED_CLEANUP_COMPLETED": "种子清理完成",
-		"SEED_CLEANUP_FAILED":   "种子清理失败",
-		"FAILED":                "任务失败",
-		"SUBMIT_FAILED":         "离线提交失败",
-		"SUBMISSION_UNKNOWN":    "提交状态待核对",
+		"SEED_CLEANUP_FAILED":    "种子清理失败",
+		"FAILED":                 "任务失败",
+		"SUBMIT_FAILED":          "离线提交失败",
+		"SUBMISSION_UNKNOWN":     "提交状态待核对",
 		"WAITING_APPROVAL":       "等待确认本地兜底",
 		"NO_ARCHIVE_FOUND":       "离线完成（无压缩包）",
 		"DATE_ORGANIZED":         "日期目录整理完成",
 		"CLOUD_EXTRACT_RETRIED":  "云解压自动重试",
+		"BARK_WINDOW_FIRED":      "Bark 触发扫描",
+		"BARK_TARGET_CHECKED":    "Bark 扫描完成",
+		"BARK_PATH_FAILED":       "Bark 路径解析失败",
+		"CLOUD_SOURCE_SCANNED":   "云监控目录扫描",
+		"DISCOVERED":             "发现新压缩包",
+		"SUBMITTED":              "离线已提交",
+		"ARCHIVE_HANDOFF":        "转交云解压",
+		"CLOUD_EXPORT_STARTED":   "开始 115 云解压",
+		"AUTO_LOCAL_FALLBACK":    "自动切换本地解压",
+		"LOCAL_FALLBACK_APPROVED": "已批准本地兜底",
+		"LOCAL_EXTRACT_STARTED":  "开始本地解压",
+		"ARCHIVE_MOVE_WARN":      "原包归档异常",
 	}
 	title := titleMap[ev.Kind]
 	if title == "" {

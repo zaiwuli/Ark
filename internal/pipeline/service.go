@@ -537,7 +537,7 @@ func (s *Service) submitQueued(ctx context.Context, cloud p115.Port, offlineRoot
 		p.ErrorCode = ""
 		p.NextRunAt = now + 15
 		_ = s.store.UpdatePipeline(ctx, p)
-		_ = s.store.RecordEvent(ctx, p.ID, "SUBMITTED", "offline_poll", "已提交至 115，等待离线下载完成", false)
+		_ = s.store.RecordEvent(ctx, p.ID, "SUBMITTED", "offline_poll", "已提交至 115，等待离线下载完成", true)
 	}
 	return nil
 }
@@ -710,16 +710,16 @@ func (s *Service) HandleBarkTrigger(ctx context.Context, targets []BarkTarget) (
 			n, err := s.scanBarkTarget(ctx, cloud, cfg, rule, src, t, today)
 			if err != nil {
 				_ = s.store.RecordEvent(ctx, "system", "BARK_PATH_FAILED", "bark",
-					fmt.Sprintf("来源「%s」路径 %s 解析失败：%s", src.Name, displayRelPath(t.RelativePath), err.Error()), false)
+					fmt.Sprintf("来源「%s」路径 %s 解析失败：%s", src.Name, displayRelPath(t.RelativePath), err.Error()), true)
 				continue
 			}
 			adopted += n
 			if n > 0 {
 				_ = s.store.RecordEvent(ctx, "system", "BARK_TARGET_CHECKED", "bark",
-					fmt.Sprintf("来源「%s」路径 %s 扫描完成，新接管 %d 个压缩包进入解压队列", src.Name, displayRelPath(t.RelativePath), n), false)
+					fmt.Sprintf("来源「%s」路径 %s 扫描完成，新接管 %d 个压缩包进入解压队列", src.Name, displayRelPath(t.RelativePath), n), true)
 			} else {
 				_ = s.store.RecordEvent(ctx, "system", "BARK_TARGET_CHECKED", "bark",
-					fmt.Sprintf("来源「%s」路径 %s 扫描完成，未发现新的主压缩包", src.Name, displayRelPath(t.RelativePath)), false)
+					fmt.Sprintf("来源「%s」路径 %s 扫描完成，未发现新的主压缩包", src.Name, displayRelPath(t.RelativePath)), true)
 			}
 		}
 	} else {
