@@ -1,38 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
   <defs>
-    <linearGradient id="bg" x1="32" y1="24" x2="480" y2="488" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0f172a"/>
-      <stop offset="55%" stop-color="#0c1e35"/>
-      <stop offset="100%" stop-color="#062825"/>
+    <radialGradient id="bgGlow" cx="50%" cy="46%" r="54%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.42"/>
+      <stop offset="52%" stop-color="#1d4ed8" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#050914" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#070d1c"/>
+      <stop offset="100%" stop-color="#040711"/>
     </linearGradient>
-    <linearGradient id="hull" x1="96" y1="244" x2="416" y2="396" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="52%" stop-color="#22d3ee"/>
-      <stop offset="100%" stop-color="#22c55e"/>
+    <linearGradient id="glass" x1="120" y1="130" x2="392" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67e8f9" stop-opacity="0.92"/>
+      <stop offset="55%" stop-color="#0284c7" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0.92"/>
     </linearGradient>
-    <linearGradient id="sail" x1="172" y1="92" x2="356" y2="278" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#4ade80"/>
-      <stop offset="100%" stop-color="#38bdf8"/>
-    </linearGradient>
-    <linearGradient id="glow" x1="256" y1="88" x2="256" y2="416" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#22c55e" stop-opacity="0.34"/>
-      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    <linearGradient id="silver" x1="250" y1="120" x2="412" y2="386" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="48%" stop-color="#cbd5e1"/>
+      <stop offset="100%" stop-color="#94a3b8"/>
     </linearGradient>
   </defs>
-  <!-- Solid rounded icon plate -->
-  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
-  <circle cx="256" cy="212" r="158" fill="url(#glow)"/>
-  <rect x="20" y="20" width="472" height="472" rx="98" stroke="#38bdf8" stroke-opacity="0.22" stroke-width="4"/>
-
-  <!-- Geometric Ark Prism / A-Frame Sail -->
-  <path d="M256 96L364 258H298L256 188L214 258H148L256 96Z" fill="url(#sail)"/>
-  <path d="M256 208L286 258H226L256 208Z" fill="#e0f2fe" fill-opacity="0.92"/>
-
-  <!-- Modern Ark Hull (Cloud + Archive Vessel) -->
-  <path d="M98 286C98 279.373 103.373 274 110 274H402C408.627 274 414 279.373 414 286V294C414 345.915 371.915 388 320 388H192C140.085 388 98 345.915 98 294V286Z" fill="url(#hull)"/>
-  <!-- Hull Precision Waterline Cutout -->
-  <rect x="166" y="314" width="180" height="16" rx="8" fill="#0b1120" fill-opacity="0.58"/>
-  <circle cx="192" cy="356" r="9" fill="#0b1120" fill-opacity="0.55"/>
-  <circle cx="256" cy="356" r="9" fill="#0b1120" fill-opacity="0.55"/>
-  <circle cx="320" cy="356" r="9" fill="#0b1120" fill-opacity="0.55"/>
+  <rect width="512" height="512" rx="112" fill="url(#plate)"/>
+  <rect width="512" height="512" rx="112" fill="url(#bgGlow)"/>
+  <!-- Origami A-Prism -->
+  <path d="M224 122H286L354 304L304 304L260 182L194 316L136 300L224 122Z" fill="url(#glass)"/>
+  <path d="M286 122L356 296L318 296L264 162L286 122Z" fill="url(#silver)"/>
+  <!-- Sculptural Ark Origami Hull -->
+  <path d="M104 318L396 226L412 272L352 386H156L104 318Z" fill="url(#glass)" fill-opacity="0.94"/>
+  <path d="M104 318L396 226L406 244L120 334L104 318Z" fill="url(#silver)"/>
+  <path d="M396 226L412 272L352 386L334 386L390 264L382 240L396 226Z" fill="url(#silver)"/>
 </svg>
