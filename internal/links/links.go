@@ -3,12 +3,14 @@ package links
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const MaxImportLinks = 1000
@@ -83,7 +85,11 @@ func parseED2K(v string) (Link, error) {
 		return Link{}, ErrInvalidED2K
 	}
 	name, err := url.QueryUnescape(parts[2])
-	if err != nil || strings.TrimSpace(name) == "" {
+	if err != nil {
+		// Match Python unquote_plus leniency when filename contains literal '%'.
+		name = parts[2]
+	}
+	if strings.TrimSpace(name) == "" {
 		return Link{}, ErrInvalidED2K
 	}
 	digest := strings.ToLower(parts[4])
@@ -181,6 +187,23 @@ func parseWebURL(v string) (Link, error) {
 
 func Extract(text string) ([]Link, []error, error) {
 	matches := linkPattern.FindAllString(text, -1)
+	if len(matches) == 0 {
+		// Fallback 1: URL-encoded links (e.g. iOS Shortcuts "URL Encode" turning ed2k:// into ed2k%3A%2F%2F).
+		if decoded := lenientPercentUnescape(text); decoded != text {
+			matches = linkPattern.FindAllString(decoded, -1)
+		}
+	}
+	if len(matches) == 0 {
+		// Fallback 2: Base64-encoded link text (e.g. iOS Shortcuts passing a .txt file inside JSON text).
+		if decoded, ok := tryDecodeBase64Text(text); ok {
+			matches = linkPattern.FindAllString(decoded, -1)
+			if len(matches) == 0 {
+				if pct := lenientPercentUnescape(decoded); pct != decoded {
+					matches = linkPattern.FindAllString(pct, -1)
+				}
+			}
+		}
+	}
 	if len(matches) > MaxImportLinks {
 		return nil, nil, ErrImportLimit
 	}
@@ -198,4 +221,59 @@ func Extract(text string) ([]Link, []error, error) {
 		out = append(out, l)
 	}
 	return out, errs, nil
+}
+
+func lenientPercentUnescape(s string) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	if dec, err := url.PathUnescape(s); err == nil {
+		return dec
+	}
+	var out []byte
+	for i := 0; i < len(s); {
+		if s[i] == '%' && i+2 < len(s) {
+			if hi, ok1 := fromHex(s[i+1]); ok1 {
+				if lo, ok2 := fromHex(s[i+2]); ok2 {
+					out = append(out, (hi<<4)|lo)
+					i += 3
+					continue
+				}
+			}
+		}
+		out = append(out, s[i])
+		i++
+	}
+	return string(out)
+}
+
+func fromHex(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', true
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, true
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func tryDecodeBase64Text(s string) (string, bool) {
+	trimmed := strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
+	if len(trimmed) < 16 {
+		return "", false
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if raw, err := enc.DecodeString(trimmed); err == nil && len(raw) > 0 && utf8.Valid(raw) {
+			return strings.TrimPrefix(string(raw), "\xef\xbb\xbf"), true
+		}
+	}
+	return "", false
 }

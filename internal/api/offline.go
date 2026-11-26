@@ -223,12 +223,18 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
 			textVal = firstNonEmpty(q.Get("text"), q.Get("url"), q.Get("link"), q.Get("links"))
 		}
-		diagSummary = fmt.Sprintf("ct=%s, bytes=%d, keys=%v", ct, len(raw), jsonKeys)
+		sample := strings.ReplaceAll(strings.TrimSpace(textVal), "\n", " ")
+		if rSample := []rune(sample); len(rSample) > 40 {
+			sample = string(rSample[:40]) + "…"
+		}
+		diagSummary = fmt.Sprintf("ct=%s, bytes=%d, keys=%v, text_len=%d, sample=%q", ct, len(raw), jsonKeys, len(textVal), sample)
 		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 	}
 
 	if err != nil {
 		if errors.Is(err, links.ErrNoLinks) {
+			_ = s.store.RecordEvent(r.Context(), "system", "IMPORT_NO_LINKS", "offline_submit",
+				"离线导入未识别到链接（"+diagSummary+"）", false)
 			writeError(w, http.StatusUnprocessableEntity, "NO_LINKS",
 				"未识别到有效磁链/ed2k/HTTP链接（"+diagSummary+"）")
 			return
