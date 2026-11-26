@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -252,5 +253,50 @@ func TestBarkPushAndPasswordsAndLocalScanAPI(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/settings/passwords", nil))
 	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"count":2`)) {
 		t.Fatalf("GET passwords unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMaintenanceClearAndCacheReclaim(t *testing.T) {
+	srv, st := newTestServer(t, true)
+	h := srv.Handler()
+
+	// Seed an orphaned cache file and a completed pipeline.
+	cacheSub := filepath.Join(srv.cacheRootDir(), "pl_old_done")
+	if err := os.MkdirAll(cacheSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheSub, "archive.rar"), bytes.Repeat([]byte("A"), 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_done','offline','id_done','done.zip','completed','complete',1,1)`)
+	_, _ = st.DB().Exec(`INSERT INTO pipelines(id,kind,identity,name,state,stage,created_at,updated_at) VALUES('p_run','offline','id_run','run.zip','downloading','offline_poll',1,1)`)
+
+	// Reclaim cache frees the orphaned 2048-byte file.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/reclaim-cache", nil))
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"freed_bytes":2048`)) {
+		t.Fatalf("reclaim-cache unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Clear terminal pipelines deletes p_done but preserves active p_run.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/clear", bytes.NewBufferString(`{"scope":"terminal"}`)))
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"deleted":1`)) {
+		t.Fatalf("clear pipelines unexpected: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.GetPipeline(t.Context(), "p_run"); err != nil {
+		t.Fatalf("active pipeline must not be cleared: %v", err)
+	}
+
+	// Clear events & vacuum succeed.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/events", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear events expected 200, got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/vacuum", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vacuum expected 200, got %d", rec.Code)
 	}
 }

@@ -61,6 +61,7 @@ const EVENT_KIND_ZH = {
   CLOUD_ROOT_INITIALIZED: '云目录初始化',
   LIFE_MONITOR_CHECK: '生活事件检查',
   BARK_WINDOW_FIRED: 'Bark 窗口触发',
+  CACHE_RECLAIMED: '缓存回收',
   RETRIED: '重新入队',
   SUCCEEDED: '处理成功',
   FAILED: '处理失败',
@@ -217,7 +218,7 @@ function switchSubTab(viewName, paneId, btn) {
   if (!view) return;
   view.querySelectorAll('.sub-pane').forEach((p) => p.classList.toggle('active', p.id === paneId));
   view.querySelectorAll('.sub-tab').forEach((b) => b.classList.toggle('active', b === btn || b.dataset.sub === paneId));
-  if (paneId === 'set-status') refreshTelemetry(true);
+  if (paneId === 'set-status') { refreshTelemetry(true); loadMaintenance(); }
 }
 
 function openSettingsStatus() {
@@ -976,6 +977,109 @@ async function delToken(id) {
   await fetch('/api/v1/tokens/' + encodeURIComponent(id), { method: 'DELETE' });
   showToast('接口令牌已撤销');
   loadTokens();
+}
+
+/* Maintenance, Clear & Cache Reclaim */
+async function loadMaintenance() {
+  try {
+    const d = await fetch('/api/v1/maintenance/summary').then((r) => r.json());
+    const st = d.stats || {};
+    const elCache = document.getElementById('mnt-cache');
+    if (!elCache) return;
+    elCache.textContent = `${fmtSize(d.cache_bytes || 0)}（${d.cache_files || 0} 个文件）`;
+    document.getElementById('mnt-db').textContent = fmtSize(st.db_bytes || 0);
+    document.getElementById('mnt-pipes').textContent = `${st.completed_pipelines || 0} 条完成 / ${st.failed_pipelines || 0} 条失败`;
+    document.getElementById('mnt-logs').textContent = `${st.event_count || 0} 条事件 / ${st.bark_count || 0} 条 Bark`;
+  } catch {}
+}
+
+async function reclaimCache(btn) {
+  if (!confirm('确认回收本地下载缓存与残留临时解压目录？（自动跳过正在进行的任务，不删除已解压成品）')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/maintenance/reclaim-cache', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`已回收 ${fmtSize(d.freed_bytes || 0)}（清理 ${d.removed_items || 0} 项）`);
+      loadMaintenance();
+    } else {
+      showToast('缓存回收失败');
+    }
+  } finally { btn.disabled = false; }
+}
+
+async function retryAllFailed(btn) {
+  if (!confirm('确认将所有失败任务一键重新入队重试？')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/pipelines/retry-failed', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`已重新入队 ${d.retried || 0} 条失败任务`);
+      loadPipelines();
+    }
+  } finally { btn.disabled = false; }
+}
+
+async function clearPipelines(scope, btn) {
+  const tip = scope === 'completed'
+    ? '确认清空所有「已完成」的任务记录？（仅清理记录，不删除真实文件）'
+    : '确认清空所有「已结束（完成+失败）」的任务记录？（进行中与待确认任务会保留，且不删除真实文件）';
+  if (!confirm(tip)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/pipelines/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`已清空 ${d.deleted || 0} 条任务记录`);
+      loadPipelines();
+      loadMaintenance();
+    }
+  } finally { btn.disabled = false; }
+}
+
+async function clearCurrentLogs(btn) {
+  const isBark = document.getElementById('log-bark-pane')?.classList.contains('active');
+  if (!confirm(isBark ? '确认清空所有 Bark 联动信号记录？' : '确认清空所有历史运行事件日志？')) return;
+  btn.disabled = true;
+  try {
+    const url = isBark ? '/api/v1/bark/messages' : '/api/v1/events';
+    const r = await fetch(url, { method: 'DELETE' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`已清空 ${d.deleted || 0} 条记录`);
+      loadLogs();
+      loadMaintenance();
+    }
+  } finally { btn.disabled = false; }
+}
+
+async function clearAllLogs(btn) {
+  if (!confirm('确认清空全部运行事件日志与 Bark 信号记录？')) return;
+  btn.disabled = true;
+  try {
+    await Promise.all([
+      fetch('/api/v1/events', { method: 'DELETE' }),
+      fetch('/api/v1/bark/messages', { method: 'DELETE' }),
+    ]);
+    showToast('已清空全部事件日志与 Bark 记录');
+    loadMaintenance();
+  } finally { btn.disabled = false; }
+}
+
+async function vacuumDB(btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/maintenance/vacuum', { method: 'POST' });
+    if (r.ok) {
+      showToast('数据库空间已整理压缩');
+      loadMaintenance();
+    }
+  } finally { btn.disabled = false; }
 }
 async function copyText(id) {
   const txt = document.getElementById(id).textContent.trim();

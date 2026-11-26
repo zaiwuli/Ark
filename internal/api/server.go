@@ -102,11 +102,20 @@ func (s *Server) registerRoutes() {
 
 	// Unified pipelines & events
 	s.mux.HandleFunc("GET /api/v1/pipelines", s.requireRole("readonly", s.handleListPipelines))
+	s.mux.HandleFunc("POST /api/v1/pipelines/clear", s.requireRole("admin", s.handleClearPipelines))
+	s.mux.HandleFunc("POST /api/v1/pipelines/retry-failed", s.requireRole("admin", s.handleRetryFailedPipelines))
 	s.mux.HandleFunc("GET /api/v1/pipelines/{id}", s.requireRole("readonly", s.handleGetPipeline))
 	s.mux.HandleFunc("POST /api/v1/pipelines/{id}/retry", s.requireRole("admin", s.handleRetryPipeline))
 	s.mux.HandleFunc("POST /api/v1/pipelines/{id}/confirm-local", s.requireRole("admin", s.handleConfirmLocalFallback))
 	s.mux.HandleFunc("DELETE /api/v1/pipelines/{id}", s.requireRole("admin", s.handleDeletePipeline))
 	s.mux.HandleFunc("GET /api/v1/events", s.requireRole("readonly", s.handleListEvents))
+	s.mux.HandleFunc("DELETE /api/v1/events", s.requireRole("admin", s.handleClearEvents))
+	s.mux.HandleFunc("DELETE /api/v1/bark/messages", s.requireRole("admin", s.handleClearBarkMessages))
+
+	// Maintenance & cache reclaim
+	s.mux.HandleFunc("GET /api/v1/maintenance/summary", s.requireRole("readonly", s.handleMaintenanceSummary))
+	s.mux.HandleFunc("POST /api/v1/maintenance/reclaim-cache", s.requireRole("admin", s.handleReclaimCache))
+	s.mux.HandleFunc("POST /api/v1/maintenance/vacuum", s.requireRole("admin", s.handleVacuumDB))
 
 	// Sources & Rules
 	s.mux.HandleFunc("GET /api/v1/sources", s.requireRole("readonly", s.handleListSources))

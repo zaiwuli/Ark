@@ -139,6 +139,8 @@
                 </select>
               </div>
               <div class="toolbar">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="retryAllFailed(this)">重试失败项</button>
+                <button type="button" class="btn btn-danger btn-sm" onclick="clearPipelines('terminal', this)">清空已结束</button>
                 <select id="page-size" aria-label="每页数量" style="width:auto;height:30px;padding:0 8px;font-size:12px;" onchange="onPageSizeChange()">
                   <option value="20" selected>20 条/页</option>
                   <option value="50">50 条/页</option>
@@ -348,7 +350,10 @@
               <button type="button" class="sub-tab active" data-sub="log-events-pane" onclick="switchSubTab('logs', 'log-events-pane', this)">最近运行事件</button>
               <button type="button" class="sub-tab" data-sub="log-bark-pane" onclick="switchSubTab('logs', 'log-bark-pane', this)">Bark 联动信号</button>
             </div>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="loadLogs()">刷新日志</button>
+            <div class="toolbar">
+              <button type="button" class="btn btn-danger btn-sm" onclick="clearCurrentLogs(this)">清空当前列表</button>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="loadLogs()">刷新日志</button>
+            </div>
           </div>
 
           <div id="log-events-pane" class="sub-pane active">
@@ -386,7 +391,7 @@
             <button type="button" class="sub-tab" data-sub="set-webhook" onclick="switchSubTab('settings', 'set-webhook', this)">通用通知回调</button>
             <button type="button" class="sub-tab" data-sub="set-pwds" onclick="switchSubTab('settings', 'set-pwds', this)">压缩包密码本</button>
             <button type="button" class="sub-tab" data-sub="set-tokens" onclick="switchSubTab('settings', 'set-tokens', this)">令牌与外部接入</button>
-            <button type="button" class="sub-tab" data-sub="set-status" onclick="switchSubTab('settings', 'set-status', this)">运行状态与内存</button>
+            <button type="button" class="sub-tab" data-sub="set-status" onclick="switchSubTab('settings', 'set-status', this)">运行状态与维护</button>
           </div>
 
           <div id="set-p115" class="sub-pane active">
@@ -628,6 +633,32 @@
                 </div>
                 <div id="kpi-up" class="kpi-value">--</div>
                 <div id="kpi-up-sub" class="kpi-meta">--</div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                  <span>下载缓存回收与数据维护</span>
+                </h2>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="loadMaintenance()">刷新统计</button>
+              </div>
+              <div class="panel-body">
+                <div class="detail-kv" style="margin-bottom:14px;">
+                  <div class="kv-item"><span>本地下载缓存占用</span><strong id="mnt-cache">--</strong></div>
+                  <div class="kv-item"><span>数据库文件体积</span><strong id="mnt-db">--</strong></div>
+                  <div class="kv-item"><span>已结束任务（完成 / 失败）</span><strong id="mnt-pipes">--</strong></div>
+                  <div class="kv-item"><span>历史日志（事件 / Bark）</span><strong id="mnt-logs">--</strong></div>
+                </div>
+                <div class="toolbar">
+                  <button type="button" class="btn btn-primary" onclick="reclaimCache(this)">回收下载缓存与临时残留</button>
+                  <button type="button" class="btn btn-secondary" onclick="clearPipelines('completed', this)">仅清空已完成任务</button>
+                  <button type="button" class="btn btn-danger" onclick="clearPipelines('terminal', this)">清空全部已结束任务</button>
+                  <button type="button" class="btn btn-secondary" onclick="clearAllLogs(this)">清空日志与 Bark</button>
+                  <button type="button" class="btn btn-secondary" onclick="vacuumDB(this)">整理压缩数据库</button>
+                </div>
+                <div class="field-help" style="margin-top:10px;">安全说明：所有清理操作均自动跳过正在运行的任务与缓存，且绝不会删除已解压成品文件或 115 云端原文件。</div>
               </div>
             </div>
           </div>
