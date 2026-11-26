@@ -183,6 +183,7 @@ type Client struct {
 
 	// Overridable base URLs for deterministic contract tests.
 	webAPIBase  string
+	natsortBase string
 	lixianBase  string
 	proAPIBase  string
 	lifeAPIBase string
@@ -220,6 +221,7 @@ func NewClient(cookie string, gov *Governor) (*Client, error) {
 		},
 		gov:         gov,
 		webAPIBase:  "https://webapi.115.com",
+		natsortBase: "https://aps.115.com",
 		lixianBase:  "https://115.com",
 		proAPIBase:  "https://proapi.115.com",
 		lifeAPIBase: "https://lifebehavior.115.com",
@@ -284,7 +286,7 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	if err := dec.Decode(&parsed); err != nil {
 		return nil, &AdapterError{Code: "INVALID_REMOTE_RESPONSE", Uncertain: mutation}
 	}
-	if state, ok := parsed["state"].(bool); ok && !state {
+	if isStateFalse(parsed["state"]) {
 		code := firstString(parsed, "errno", "errcode", "errNo")
 		switch code {
 		case "99", "401", "911", "990009":
@@ -300,25 +302,77 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, form url.Val
 	return parsed, nil
 }
 
-func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, error) {
+func isStateFalse(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return !t
+	case json.Number:
+		return t.String() == "0"
+	case float64:
+		return t == 0
+	case string:
+		return strings.EqualFold(t, "false") || t == "0"
+	default:
+		return false
+	}
+}
+
+func (c *Client) fetchFilesJSON(ctx context.Context, cid string, offset, limit int) (map[string]any, error) {
 	q := url.Values{
 		"aid":      {"1"},
 		"cid":      {cid},
 		"offset":   {strconv.Itoa(offset)},
 		"show_dir": {"1"},
-		"limit":    {"115"},
+		"limit":    {strconv.Itoa(limit)},
 		"cur":      {"1"},
 		"format":   {"json"},
 	}
 	resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files?"+q.Encode(), nil, false)
 	if err != nil {
+		var aErr *AdapterError
+		if errors.As(err, &aErr) && aErr.RemoteCode == "20130827" {
+			// Natural-sort / custom-sort folder on 115 requires aps.115.com/natsort/files.php.
+			q.Set("natsort", "1")
+			return c.doJSON(ctx, http.MethodGet, c.natsortBase+"/natsort/files.php?"+q.Encode(), nil, false)
+		}
+		return nil, err
+	}
+	return resp, nil
+}
+
+func verifyCIDResponse(resp map[string]any, cid string) ([]string, error) {
+	parts := extractBreadcrumb(resp["path"])
+	if cid == "0" {
+		if len(parts) == 0 {
+			return []string{"0"}, nil
+		}
+		return parts, nil
+	}
+	if len(parts) > 0 && parts[len(parts)-1] == cid {
+		return parts, nil
+	}
+	topCID := firstString(resp, "cid")
+	if len(parts) == 0 && topCID == cid {
+		return []string{"0", cid}, nil
+	}
+	got := topCID
+	if len(parts) > 0 {
+		got = parts[len(parts)-1]
+	}
+	if got == "" {
+		got = "empty"
+	}
+	return nil, &AdapterError{Code: "CID_NOT_VERIFIED", Step: cid, RemoteCode: "got=" + got}
+}
+
+func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, error) {
+	resp, err := c.fetchFilesJSON(ctx, cid, offset, 115)
+	if err != nil {
 		return FilePage{}, err
 	}
 	// Verify returned breadcrumb path ends with requested CID (prevents silent fallback to root).
-	if cid != "0" {
-		if !verifyBreadcrumb(resp["path"], cid) {
-			return FilePage{}, &AdapterError{Code: "CID_NOT_VERIFIED", Step: cid}
-		}
+	if _, err := verifyCIDResponse(resp, cid); err != nil {
+		return FilePage{}, err
 	}
 	rawList, ok := resp["data"].([]any)
 	if !ok {
@@ -357,21 +411,11 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 }
 
 func (c *Client) DirectoryPath(ctx context.Context, cid string) ([]string, error) {
-	q := url.Values{
-		"aid": {"1"}, "cid": {cid}, "limit": {"1"}, "offset": {"0"}, "show_dir": {"1"}, "cur": {"1"}, "format": {"json"},
-	}
-	resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files?"+q.Encode(), nil, false)
+	resp, err := c.fetchFilesJSON(ctx, cid, 0, 1)
 	if err != nil {
 		return nil, err
 	}
-	parts := extractBreadcrumb(resp["path"])
-	if cid != "0" && (len(parts) == 0 || parts[len(parts)-1] != cid) {
-		return nil, &AdapterError{Code: "CID_NOT_VERIFIED", Step: cid}
-	}
-	if len(parts) == 0 {
-		return []string{"0"}, nil
-	}
-	return parts, nil
+	return verifyCIDResponse(resp, cid)
 }
 
 func (c *Client) EnsureFolder(ctx context.Context, parentCID, name string) (string, error) {

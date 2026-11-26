@@ -707,9 +707,13 @@ function formatSourceConfig(src) {
   } catch { return src.config_json || '-'; }
 }
 
+let cachedSources = [];
+let editingSourceId = '';
+
 async function loadSources() {
   const d = await fetch('/api/v1/sources').then((r) => r.json());
   const items = d.items || [];
+  cachedSources = items;
   state.sourcesMap = {};
   items.forEach((s) => { state.sourcesMap[s.id] = s.name; });
 
@@ -720,9 +724,43 @@ async function loadSources() {
       <td><span class="badge ${s.kind === 'local' ? 'badge-info' : 'badge-ok'}">${s.kind === 'local' ? '本地目录' : '115 云目录'}</span></td>
       <td><code>${esc(formatSourceConfig(s))}</code></td>
       <td>${s.bark_prefix ? `<code>${esc(s.bark_prefix)}</code>` : '<span class="field-help">未配置</span>'}</td>
-      <td style="text-align:right;"><button type="button" class="btn btn-danger btn-sm" onclick="delSource('${s.id}')">删除</button></td>
+      <td style="text-align:right;white-space:nowrap;">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="editSource('${s.id}')">编辑</button>
+        <button type="button" class="btn btn-danger btn-sm" onclick="delSource('${s.id}')">删除</button>
+      </td>
     </tr>
   `).join('') : '<tr><td colspan="5" class="field-help">暂无自定义来源（系统默认自动监控工作目录下的「本地监控」文件夹）</td></tr>';
+}
+
+function editSource(id) {
+  const s = cachedSources.find((x) => x.id === id);
+  if (!s) return;
+  editingSourceId = s.id;
+  document.getElementById('src-name').value = s.name || '';
+  document.getElementById('src-kind').value = s.kind || 'local';
+  try {
+    const c = JSON.parse(s.config_json || '{}');
+    document.getElementById('src-target').value = s.kind === 'local' ? (c.path || '') : (c.cid || '');
+  } catch {
+    document.getElementById('src-target').value = '';
+  }
+  document.getElementById('src-bark').value = s.bark_prefix || '';
+  const sb = document.getElementById('src-submit-btn');
+  const cb = document.getElementById('src-cancel-btn');
+  if (sb) sb.textContent = '保存修改';
+  if (cb) cb.style.display = 'inline-flex';
+  document.getElementById('src-name').focus();
+}
+
+function cancelEditSource() {
+  editingSourceId = '';
+  document.getElementById('src-name').value = '';
+  document.getElementById('src-target').value = '';
+  document.getElementById('src-bark').value = '';
+  const sb = document.getElementById('src-submit-btn');
+  const cb = document.getElementById('src-cancel-btn');
+  if (sb) sb.textContent = '添加监控来源';
+  if (cb) cb.style.display = 'none';
 }
 
 async function loadArchiveRule() {
@@ -759,16 +797,17 @@ async function addSource(btn) {
   btn.disabled = true;
   try {
     const cfg = kind === 'local' ? { path: target, squash_root: true, disable_recursion: true } : { cid: target };
+    const payload = { name, kind, enabled: true, bark_prefix, config_json: JSON.stringify(cfg) };
+    if (editingSourceId) payload.id = editingSourceId;
     const r = await fetch('/api/v1/sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, kind, enabled: true, bark_prefix, config_json: JSON.stringify(cfg) }),
+      body: JSON.stringify(payload),
     });
     if (!r.ok) return showAlert('src-alert', '保存监控来源失败');
-    document.getElementById('src-name').value = '';
-    document.getElementById('src-target').value = '';
-    document.getElementById('src-bark').value = '';
-    showToast('监控来源已添加');
+    const wasEdit = !!editingSourceId;
+    cancelEditSource();
+    showToast(wasEdit ? '监控来源已更新' : '监控来源已添加');
     loadSources();
   } finally { btn.disabled = false; }
 }

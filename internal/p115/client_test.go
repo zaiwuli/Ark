@@ -133,3 +133,34 @@ func TestClientLargeNumericCIDPrecision(t *testing.T) {
 		t.Fatalf("CID precision corrupted: got %v want [%s]", parts, bigCID)
 	}
 }
+
+func TestClientNatsortFallbackOn20130827(t *testing.T) {
+	const targetCID = "3123456789012345975"
+	natsortHit := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/files" {
+			_, _ = w.Write([]byte(`{"state":false,"errNo":20130827,"error":"natural sort"}`))
+			return
+		}
+		if r.URL.Path == "/natsort/files.php" {
+			natsortHit = true
+			_, _ = w.Write([]byte(`{"state":true,"count":1,"cid":3123456789012345975,"path":[{"cid":0},{"cid":3123456789012345975}],"data":[{"fid":"f1","n":"demo.rar","s":2048,"pc":"pc1"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	c, err := NewClient("UID=12345_A1_1", NewGovernor(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.webAPIBase = ts.URL
+	c.natsortBase = ts.URL
+	c.minInterval = 0
+
+	page, err := c.Files(t.Context(), targetCID, 0)
+	if err != nil || !natsortHit || len(page.Files) != 1 || page.Files[0].Name != "demo.rar" {
+		t.Fatalf("expected natsort fallback success, hit=%v page=%+v err=%v", natsortHit, page, err)
+	}
+}
