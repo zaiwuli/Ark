@@ -18,25 +18,10 @@ const (
 	maxIdemKeyLen         = 128
 )
 
-// requireImportAuth enforces token auth on /api/v1/offline/import once any token exists.
+// requireImportAuth validates Bearer admin tokens when provided or when NoAuth is disabled.
+// In default LAN NoAuth mode (ARK_NO_AUTH=true), same-origin Web UI imports work even after creating Bark/API tokens.
 func (s *Server) requireImportAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-		if authHeader != "" {
-			s.requireRole("admin", next)(w, r)
-			return
-		}
-		hasTokens, err := s.store.HasAnyTokens(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "auth check failed")
-			return
-		}
-		if hasTokens || !s.cfg.NoAuth {
-			writeError(w, http.StatusUnauthorized, "LOGIN_REQUIRED", "Bearer admin token required")
-			return
-		}
-		s.requireRole("admin", next)(w, r)
-	}
+	return s.requireRole("admin", next)
 }
 
 func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {

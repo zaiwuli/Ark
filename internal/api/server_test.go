@@ -134,7 +134,8 @@ func TestTelegramSettingsRoundTripMasksSecret(t *testing.T) {
 }
 
 func TestOfflineImportAPIIdempotencyTorrentAndBatchIsolation(t *testing.T) {
-	srv, st := newTestServer(t, true)
+	// Strict auth mode (NoAuth=false): requires Bearer admin token and enforces batch isolation.
+	srv, st := newTestServer(t, false)
 	h := srv.Handler()
 
 	_, tokA, err := st.CreateToken(t.Context(), "ClientA", "", "admin", nil)
@@ -150,7 +151,17 @@ func TestOfflineImportAPIIdempotencyTorrentAndBatchIsolation(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/offline/import",
 		bytes.NewBufferString(`{"text":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"}`)))
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 when tokens exist, got %d", rec.Code)
+		t.Fatalf("expected 401 when auth required, got %d", rec.Code)
+	}
+
+	// LAN NoAuth mode (NoAuth=true): Web UI offline import still works even after Bark tokens exist.
+	lanSrv, lanSt := newTestServer(t, true)
+	_, _, _ = lanSt.CreateToken(t.Context(), "BarkToken", "", "admin", nil)
+	lanRec := httptest.NewRecorder()
+	lanSrv.Handler().ServeHTTP(lanRec, httptest.NewRequest(http.MethodPost, "/api/v1/offline/import",
+		bytes.NewBufferString(`{"text":"magnet:?xt=urn:btih:1111111111111111111111111111111111111111"}`)))
+	if lanRec.Code != http.StatusAccepted {
+		t.Fatalf("LAN NoAuth offline import should succeed even when Bark tokens exist, got %d: %s", lanRec.Code, lanRec.Body.String())
 	}
 
 	payload := `{"text":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Demo","auto_extract":true}`
