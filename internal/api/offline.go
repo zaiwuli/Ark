@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -33,63 +35,129 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 	}
 	principal := principalFrom(r.Context())
 
-	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	var res store.BatchResult
 	var err error
 
-	if strings.HasPrefix(ct, "multipart/form-data") {
-		if parseErr := r.ParseMultipartForm(torrent.MaxTorrentBytes + 64*1024); parseErr != nil {
+	switch {
+	case strings.HasPrefix(ct, "multipart/form-data"):
+		if parseErr := r.ParseMultipartForm(maxImportRequestBytes); parseErr != nil {
 			writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request exceeds limit")
 			return
 		}
-		textVal := strings.TrimSpace(r.FormValue("text"))
+		textVal := firstNonEmpty(
+			r.FormValue("text"),
+			r.FormValue("url"),
+			r.FormValue("urls"),
+			r.FormValue("links"),
+			r.FormValue("content"),
+		)
+		autoExtract, ok := parseAutoExtractForm(r.FormValue("auto_extract"))
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "auto_extract must be boolean")
+			return
+		}
 		file, header, fileErr := r.FormFile("file")
-		if fileErr != nil {
-			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "torrent file field required")
-			return
-		}
-		defer file.Close()
-		if textVal != "" {
-			writeError(w, http.StatusUnprocessableEntity, "TORRENT_IMPORT_SEPARATELY", "cannot mix torrent file with link text")
-			return
-		}
-		if header != nil && !strings.HasSuffix(strings.ToLower(header.Filename), ".torrent") {
-			writeError(w, http.StatusUnprocessableEntity, "INVALID_TORRENT", "filename must end with .torrent")
-			return
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(file, torrent.MaxTorrentBytes+1))
-		if readErr != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_TORRENT", "failed to read torrent")
-			return
-		}
-		if len(raw) > torrent.MaxTorrentBytes {
-			writeError(w, http.StatusRequestEntityTooLarge, "TORRENT_SIZE_LIMIT", "torrent exceeds 2 MiB")
-			return
-		}
-		autoExtract := true
-		if rawAuto := strings.TrimSpace(r.FormValue("auto_extract")); rawAuto != "" {
-			if parsed, bErr := strconv.ParseBool(rawAuto); bErr == nil {
-				autoExtract = parsed
+		if fileErr == nil {
+			defer file.Close()
+			isTorrent := header != nil && strings.HasSuffix(strings.ToLower(header.Filename), ".torrent")
+			if isTorrent {
+				if strings.TrimSpace(textVal) != "" {
+					writeError(w, http.StatusUnprocessableEntity, "TORRENT_IMPORT_SEPARATELY", "cannot mix torrent file with link text")
+					return
+				}
+				raw, readErr := io.ReadAll(io.LimitReader(file, torrent.MaxTorrentBytes+1))
+				if readErr != nil {
+					writeError(w, http.StatusBadRequest, "INVALID_TORRENT", "failed to read torrent")
+					return
+				}
+				if len(raw) > torrent.MaxTorrentBytes {
+					writeError(w, http.StatusRequestEntityTooLarge, "TORRENT_SIZE_LIMIT", "torrent exceeds 2 MiB")
+					return
+				}
+				res, err = s.pipeline.ImportTorrent(r.Context(), principal.TokenID, idemKey, raw, autoExtract)
 			} else {
-				writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "auto_extract must be boolean")
-				return
+				// Non-torrent file (e.g. .txt link list from iOS Shortcuts or legacy 115tools clients).
+				raw, readErr := io.ReadAll(io.LimitReader(file, maxImportRequestBytes+1))
+				if readErr != nil {
+					writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "failed to read uploaded text file")
+					return
+				}
+				if len(raw) > maxImportRequestBytes {
+					writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "uploaded file exceeds limit")
+					return
+				}
+				fileText := strings.TrimPrefix(string(raw), "\xef\xbb\xbf")
+				if strings.TrimSpace(textVal) != "" {
+					textVal += "\n" + fileText
+				} else {
+					textVal = fileText
+				}
+				res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 			}
+		} else {
+			res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 		}
-		res, err = s.pipeline.ImportTorrent(r.Context(), principal.TokenID, idemKey, raw, autoExtract)
-	} else {
-		var req struct {
-			Text        string `json:"text"`
-			AutoExtract *bool  `json:"auto_extract"`
-		}
-		if decErr := decodeJSON(r, &req, maxImportRequestBytes); decErr != nil {
-			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON payload")
+
+	case strings.HasPrefix(ct, "application/x-www-form-urlencoded"):
+		if parseErr := r.ParseForm(); parseErr != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid form body")
 			return
 		}
-		autoExtract := true
-		if req.AutoExtract != nil {
-			autoExtract = *req.AutoExtract
+		textVal := firstNonEmpty(
+			r.FormValue("text"),
+			r.FormValue("url"),
+			r.FormValue("urls"),
+			r.FormValue("links"),
+			r.FormValue("content"),
+		)
+		autoExtract, ok := parseAutoExtractForm(r.FormValue("auto_extract"))
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "auto_extract must be boolean")
+			return
 		}
-		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, req.Text, autoExtract)
+		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
+
+	default:
+		raw, readErr := io.ReadAll(io.LimitReader(r.Body, maxImportRequestBytes+1))
+		if readErr != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "failed to read request body")
+			return
+		}
+		if len(raw) > maxImportRequestBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request exceeds limit")
+			return
+		}
+		trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}))
+		autoExtract := true
+		var textVal string
+
+		if strings.HasPrefix(ct, "application/json") || (len(trimmed) > 0 && trimmed[0] == '{') {
+			var obj map[string]any
+			if decErr := json.Unmarshal(trimmed, &obj); decErr != nil {
+				if strings.HasPrefix(ct, "application/json") {
+					writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON payload")
+					return
+				}
+				textVal = string(trimmed)
+			} else {
+				textVal = extractTextFromJSONMap(obj)
+				if rawAuto, ok := obj["auto_extract"]; ok {
+					switch v := rawAuto.(type) {
+					case bool:
+						autoExtract = v
+					case string:
+						if parsed, bErr := strconv.ParseBool(strings.TrimSpace(v)); bErr == nil {
+							autoExtract = parsed
+						}
+					}
+				}
+			}
+		} else {
+			// Plain text / raw body (compatible with legacy 115tools & iOS Shortcuts text body).
+			textVal = string(trimmed)
+		}
+		res, err = s.pipeline.ImportText(r.Context(), principal.TokenID, idemKey, textVal, autoExtract)
 	}
 
 	if err != nil {
@@ -97,6 +165,51 @@ func (s *Server) handleOfflineImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, res)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func parseAutoExtractForm(raw string) (bool, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return true, true
+	}
+	b, err := strconv.ParseBool(s)
+	return b, err == nil
+}
+
+func extractTextFromJSONMap(obj map[string]any) string {
+	keys := []string{"text", "url", "urls", "links", "content", "magnet", "data"}
+	var parts []string
+	for _, k := range keys {
+		raw, ok := obj[k]
+		if !ok || raw == nil {
+			continue
+		}
+		switch v := raw.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				parts = append(parts, v)
+			}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+					parts = append(parts, s)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {

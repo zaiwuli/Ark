@@ -221,6 +221,51 @@ func TestOfflineImportAPIIdempotencyTorrentAndBatchIsolation(t *testing.T) {
 	if recTor.Code != http.StatusAccepted {
 		t.Fatalf("torrent upload expected 202, got %d: %s", recTor.Code, recTor.Body.String())
 	}
+
+	// Legacy 115tools & iOS Shortcut formats: raw text/plain, form-urlencoded, multipart .txt, and JSON field alias.
+	rawReq := httptest.NewRequest(http.MethodPost, "/api/115/offline/import",
+		bytes.NewBufferString("magnet:?xt=urn:btih:2222222222222222222222222222222222222222"))
+	rawReq.Header.Set("Authorization", "Bearer "+tokA)
+	rawReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	rawRec := httptest.NewRecorder()
+	h.ServeHTTP(rawRec, rawReq)
+	if rawRec.Code != http.StatusAccepted {
+		t.Fatalf("plain text import expected 202, got %d: %s", rawRec.Code, rawRec.Body.String())
+	}
+
+	formReq := httptest.NewRequest(http.MethodPost, "/api/v1/offline/import",
+		bytes.NewBufferString("text=magnet%3A%3Fxt%3Durn%3Abtih%3A3333333333333333333333333333333333333333"))
+	formReq.Header.Set("Authorization", "Bearer "+tokA)
+	formReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	formRec := httptest.NewRecorder()
+	h.ServeHTTP(formRec, formReq)
+	if formRec.Code != http.StatusAccepted {
+		t.Fatalf("urlencoded import expected 202, got %d: %s", formRec.Code, formRec.Body.String())
+	}
+
+	var txtBuf bytes.Buffer
+	txtWriter := multipart.NewWriter(&txtBuf)
+	txtPart, _ := txtWriter.CreateFormFile("file", "links.txt")
+	_, _ = txtPart.Write([]byte("\xef\xbb\xbfmagnet:?xt=urn:btih:4444444444444444444444444444444444444444\n"))
+	_ = txtWriter.Close()
+	txtReq := httptest.NewRequest(http.MethodPost, "/api/v1/offline/import", &txtBuf)
+	txtReq.Header.Set("Authorization", "Bearer "+tokA)
+	txtReq.Header.Set("Content-Type", txtWriter.FormDataContentType())
+	txtRec := httptest.NewRecorder()
+	h.ServeHTTP(txtRec, txtReq)
+	if txtRec.Code != http.StatusAccepted {
+		t.Fatalf("multipart txt upload expected 202, got %d: %s", txtRec.Code, txtRec.Body.String())
+	}
+
+	aliasReq := httptest.NewRequest(http.MethodPost, "/api/v1/offline/import",
+		bytes.NewBufferString(`{"url":"magnet:?xt=urn:btih:5555555555555555555555555555555555555555"}`))
+	aliasReq.Header.Set("Authorization", "Bearer "+tokA)
+	aliasReq.Header.Set("Content-Type", "application/json")
+	aliasRec := httptest.NewRecorder()
+	h.ServeHTTP(aliasRec, aliasReq)
+	if aliasRec.Code != http.StatusAccepted {
+		t.Fatalf("json url alias expected 202, got %d: %s", aliasRec.Code, aliasRec.Body.String())
+	}
 }
 
 func TestBarkPushAndPasswordsAndLocalScanAPI(t *testing.T) {

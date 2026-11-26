@@ -91,8 +91,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/monitor/local-scan", s.requireRole("admin", s.handleTriggerLocalScan))
 	s.mux.HandleFunc("POST /api/v1/monitor/cloud-scan", s.requireRole("admin", s.handleTriggerCloudScan))
 
-	// Offline import & token-scoped batch status (compatible with third-party API)
+	// Offline import & token-scoped batch status (compatible with third-party API and legacy 115tools)
 	s.mux.HandleFunc("POST /api/v1/offline/import", s.requireImportAuth(s.handleOfflineImport))
+	s.mux.HandleFunc("POST /api/115/offline/import", s.requireImportAuth(s.handleOfflineImport))
 	s.mux.HandleFunc("GET /api/v1/import/batches/{batch_id}", s.requireRole("readonly", s.handleGetBatch))
 
 	// Bark trigger server endpoints (authenticated via device_key = admin API token)
