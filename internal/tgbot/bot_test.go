@@ -25,17 +25,25 @@ type apiCall struct {
 type mockTelegram struct {
 	mu      sync.Mutex
 	calls   []apiCall
-	torrent []byte
+	files   map[string][]byte
 	server  *httptest.Server
 }
 
-func newMockTelegram(t *testing.T, torrentBytes []byte) *mockTelegram {
+func newMockTelegram(t *testing.T, files map[string][]byte) *mockTelegram {
 	t.Helper()
-	m := &mockTelegram{torrent: torrentBytes}
+	m := &mockTelegram{files: files}
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/file/bot") {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(m.torrent)
+		if idx := strings.Index(r.URL.Path, "/file/bot"); idx >= 0 {
+			rest := r.URL.Path[idx+len("/file/bot"):]
+			if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+				filePath := rest[slash+1:]
+				if data, ok := m.files[filePath]; ok {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(data)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -51,7 +59,8 @@ func newMockTelegram(t *testing.T, torrentBytes []byte) *mockTelegram {
 
 		w.Header().Set("Content-Type", "application/json")
 		if method == "getFile" {
-			_, _ = w.Write([]byte(`{"ok":true,"result":{"file_path":"documents/sample.torrent"}}`))
+			fid, _ := body["file_id"].(string)
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"file_path":"documents/` + fid + `"}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
@@ -75,7 +84,7 @@ func (m *mockTelegram) count() int {
 	return len(m.calls)
 }
 
-func setupTestBot(t *testing.T, torrentBytes []byte) (*Bot, *store.Store, *pipeline.Service, *mockTelegram, notify.TelegramConfig, string) {
+func setupTestBot(t *testing.T, files map[string][]byte) (*Bot, *store.Store, *pipeline.Service, *mockTelegram, notify.TelegramConfig, string) {
 	t.Helper()
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
@@ -98,7 +107,7 @@ func setupTestBot(t *testing.T, torrentBytes []byte) (*Bot, *store.Store, *pipel
 	})
 	notifier := notify.NewDispatcher(st)
 	mc := metrics.NewCollector()
-	mock := newMockTelegram(t, torrentBytes)
+	mock := newMockTelegram(t, files)
 
 	cfg := notify.TelegramConfig{
 		Enabled:  true,
@@ -206,9 +215,15 @@ func TestCommandsMenuStatusPausePwdRules(t *testing.T) {
 	}
 }
 
-func TestDirectMagnetAndTorrentOfflineImport(t *testing.T) {
+func TestDirectMagnetTorrentAndTextOfflineImport(t *testing.T) {
 	sampleTorrent := []byte("d4:infod6:lengthi1024e4:name8:demo.zip12:piece lengthi16384e6:pieces20:01234567890123456789ee")
-	bot, st, _, mock, cfg, _ := setupTestBot(t, sampleTorrent)
+	sampleTxt := []byte("\xef\xbb\xbf# 批量资源\nmagnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=PackA\nhttps://example.com/archive_b.zip\nmagnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Dup\n")
+	emptyTxt := []byte("这里没有任何下载链接\n纯备注内容")
+	bot, st, _, mock, cfg, _ := setupTestBot(t, map[string][]byte{
+		"documents/doc_123": sampleTorrent,
+		"documents/txt_ok":  sampleTxt,
+		"documents/txt_nil": emptyTxt,
+	})
 	ctx := t.Context()
 
 	// Configure minimal 115 settings so ImportText / ImportTorrent accept jobs.
@@ -245,9 +260,39 @@ func TestDirectMagnetAndTorrentOfflineImport(t *testing.T) {
 		t.Fatalf("unexpected torrent reply: %q", txt)
 	}
 
+	// 3. Direct .txt document drop with mixed links & 1 duplicate
+	bot.ProcessUpdate(ctx, cfg, tgUpdate{
+		Message: &tgMessage{
+			Chat: tgChat{ID: 998877},
+			Document: &tgDocument{
+				FileID:   "txt_ok",
+				FileName: "batch_links.txt",
+				FileSize: int64(len(sampleTxt)),
+			},
+		},
+	})
+	if txt := mock.lastCall().Body["text"].(string); !strings.Contains(txt, "文本文件已解析并提交离线") || !strings.Contains(txt, "新入队：<b>2</b>") || !strings.Contains(txt, "重复忽略：1") {
+		t.Fatalf("unexpected txt reply: %q", txt)
+	}
+
+	// 4. .txt document with no links gives clear error
+	bot.ProcessUpdate(ctx, cfg, tgUpdate{
+		Message: &tgMessage{
+			Chat: tgChat{ID: 998877},
+			Document: &tgDocument{
+				FileID:   "txt_nil",
+				FileName: "notes.txt",
+				FileSize: int64(len(emptyTxt)),
+			},
+		},
+	})
+	if txt := mock.lastCall().Body["text"].(string); !strings.Contains(txt, "未在 <code>notes.txt</code> 中识别到可用") {
+		t.Fatalf("unexpected empty txt reply: %q", txt)
+	}
+
 	items, err := st.ListPipelines(ctx, "", "", 20)
-	if err != nil || len(items) != 2 {
-		t.Fatalf("expected 2 offline pipelines queued, got %d (err=%v)", len(items), err)
+	if err != nil || len(items) != 4 {
+		t.Fatalf("expected 4 offline pipelines queued, got %d (err=%v)", len(items), err)
 	}
 }
 

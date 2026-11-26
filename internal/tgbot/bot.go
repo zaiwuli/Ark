@@ -190,10 +190,17 @@ func (b *Bot) ProcessUpdate(ctx context.Context, cfg notify.TelegramConfig, upd 
 }
 
 func (b *Bot) handleMessage(ctx context.Context, cfg notify.TelegramConfig, msg *tgMessage) {
-	// 1. Direct .torrent file upload -> parse locally and queue 115 offline download.
-	if msg.Document != nil && strings.HasSuffix(strings.ToLower(msg.Document.FileName), ".torrent") {
-		b.handleTorrentDoc(ctx, cfg, msg.Chat.ID, msg.Document)
-		return
+	// 1. Direct .torrent or .txt document upload -> parse locally and queue 115 offline download.
+	if msg.Document != nil {
+		lowerName := strings.ToLower(strings.TrimSpace(msg.Document.FileName))
+		switch {
+		case strings.HasSuffix(lowerName, ".torrent"):
+			b.handleTorrentDoc(ctx, cfg, msg.Chat.ID, msg.Document)
+			return
+		case strings.HasSuffix(lowerName, ".txt"):
+			b.handleTextDoc(ctx, cfg, msg.Chat.ID, msg.Document)
+			return
+		}
 	}
 
 	text := strings.TrimSpace(msg.Text)
@@ -288,7 +295,36 @@ func (b *Bot) handleMessage(ctx context.Context, cfg notify.TelegramConfig, msg 
 	kb := &notify.InlineKeyboardMarkup{InlineKeyboard: [][]notify.InlineButton{
 		{{Text: "🏠 打开方舟主控台", CallbackData: "menu"}},
 	}}
-	_ = b.sendMessage(ctx, cfg, msg.Chat.ID, "💡 直接发送<b>磁链 / 电驴 / HTTP 链接</b>或 <b>.torrent 种子文件</b>即可离线下载；或点击下方打开主控台。", kb)
+	_ = b.sendMessage(ctx, cfg, msg.Chat.ID, "💡 直接发送<b>磁链 / 电驴 / HTTP 链接</b>、<b>.txt 链接文件</b>或 <b>.torrent 种子文件</b>即可离线下载；或点击下方打开主控台。", kb)
+}
+
+func (b *Bot) handleTextDoc(ctx context.Context, cfg notify.TelegramConfig, chatID int64, doc *tgDocument) {
+	if doc.FileSize > torrent.MaxTorrentBytes {
+		_ = b.sendMessage(ctx, cfg, chatID, "❌ 文本文件超过 2 MB 上限，无法处理。", nil)
+		return
+	}
+	raw, err := b.downloadFile(ctx, cfg, doc.FileID)
+	if err != nil {
+		_ = b.sendMessage(ctx, cfg, chatID, "❌ 下载文本文件失败，请检查反代/代理连接。", nil)
+		return
+	}
+	content := strings.TrimPrefix(string(raw), "\xef\xbb\xbf")
+	parsed, _, parseErr := links.Extract(content)
+	if parseErr != nil || len(parsed) == 0 {
+		_ = b.sendMessage(ctx, cfg, chatID, fmt.Sprintf("❌ 未在 <code>%s</code> 中识别到可用的磁链 / 电驴 / HTTP 链接。", html.EscapeString(doc.FileName)), nil)
+		return
+	}
+	res, err := b.pipeline.ImportText(ctx, "tgbot", "", content, true)
+	if err != nil {
+		_ = b.sendMessage(ctx, cfg, chatID, "❌ 文本离线提交失败："+html.EscapeString(zhDomainErr(err)), nil)
+		return
+	}
+	kb := &notify.InlineKeyboardMarkup{InlineKeyboard: [][]notify.InlineButton{
+		{{Text: "📋 查看任务", CallbackData: "tasks:all"}, {Text: "🏠 主控台", CallbackData: "menu"}},
+	}}
+	out := fmt.Sprintf("✅ <b>文本文件已解析并提交离线</b>\n文件：<code>%s</code>\n• 新入队：<b>%d</b> 条\n• 重复忽略：%d 条\n• 无效跳过：%d 条",
+		html.EscapeString(doc.FileName), res.Queued, res.Duplicates, res.Invalid)
+	_ = b.sendMessage(ctx, cfg, chatID, out, kb)
 }
 
 func (b *Bot) handleTorrentDoc(ctx context.Context, cfg notify.TelegramConfig, chatID int64, doc *tgDocument) {
@@ -561,7 +597,7 @@ func (b *Bot) renderMainMenu(ctx context.Context) (string, *notify.InlineKeyboar
 	}
 	stats, _ := b.store.MaintenanceStats(ctx, b.dbPath)
 	txt := fmt.Sprintf(
-		"⛵ <b>方舟 · 快捷主控台</b>\n调度状态：%s\n任务概况：进行中 <b>%d</b> · 失败 <b>%d</b> · 已完成 <b>%d</b>\n\n💡 直接向我发送<b>磁链 / 电驴 / 链接</b>或 <b>.torrent 种子</b>即可提交 115 离线下载。",
+		"⛵ <b>方舟 · 快捷主控台</b>\n调度状态：%s\n任务概况：进行中 <b>%d</b> · 失败 <b>%d</b> · 已完成 <b>%d</b>\n\n💡 直接向我发送<b>磁链 / 电驴 / 链接</b>、<b>.txt 文件</b>或 <b>.torrent 种子</b>即可提交 115 离线下载。",
 		schedState, stats.ActivePipelines, stats.FailedPipelines, stats.CompletedPipelines,
 	)
 	kb := &notify.InlineKeyboardMarkup{
