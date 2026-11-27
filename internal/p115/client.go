@@ -366,9 +366,13 @@ func (c *Client) doJSONWithCookies(ctx context.Context, method, rawURL string, f
 			msg = msg[:120]
 		}
 		switch code {
-		case "99", "401", "911", "990009":
+		case "99", "401", "911":
 			c.gov.Failure("AUTH_OR_CHALLENGE_REQUIRED", time.Now())
 			return nil, nil, &AdapterError{Code: "AUTH_OR_CHALLENGE_REQUIRED", RemoteCode: code, Step: msg}
+		case "990009":
+			// 115 returns 990009 when a previous async move/delete is still in progress ("操作尚未执行完成，请稍后再试").
+			// Never trip the 30-minute auth circuit breaker for this transient busy state.
+			return nil, nil, &AdapterError{Code: "REMOTE_BUSY", RemoteCode: code, Step: msg}
 		case "429", "10001":
 			c.gov.Failure("REMOTE_RATE_LIMIT", time.Now())
 			return nil, nil, &AdapterError{Code: "REMOTE_RATE_LIMIT", RemoteCode: code, Step: msg}
@@ -661,6 +665,7 @@ func (c *Client) DeleteVerified(ctx context.Context, loc FileLocator) error {
 }
 
 // BatchMove moves up to 50 FIDs per HTTP request into targetCID, drastically reducing 115 API calls.
+// Automatically retries transient 990009 ("previous move still running") responses.
 func (c *Client) BatchMove(ctx context.Context, sourceCID string, fids []string, targetCID string) error {
 	if len(fids) == 0 {
 		return nil
@@ -675,8 +680,24 @@ func (c *Client) BatchMove(ctx context.Context, sourceCID string, fids []string,
 		for j, fid := range fids[i:end] {
 			form.Set(fmt.Sprintf("fid[%d]", j), fid)
 		}
-		if _, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/move", form, true); err != nil {
-			return err
+		var lastErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			_, lastErr = c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/move", form, true)
+			if lastErr == nil {
+				break
+			}
+			var aErr *AdapterError
+			if !errors.As(lastErr, &aErr) || aErr.RemoteCode != "990009" {
+				return lastErr
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(4 * time.Second):
+			}
+		}
+		if lastErr != nil {
+			return lastErr
 		}
 	}
 	c.InvalidateDirCache(sourceCID, targetCID)
@@ -698,8 +719,24 @@ func (c *Client) BatchDelete(ctx context.Context, sourceCID string, fids []strin
 		for j, fid := range fids[i:end] {
 			form.Set(fmt.Sprintf("fid[%d]", j), fid)
 		}
-		if _, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/rb/delete", form, true); err != nil {
-			return err
+		var lastErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			_, lastErr = c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/rb/delete", form, true)
+			if lastErr == nil {
+				break
+			}
+			var aErr *AdapterError
+			if !errors.As(lastErr, &aErr) || aErr.RemoteCode != "990009" {
+				return lastErr
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(4 * time.Second):
+			}
+		}
+		if lastErr != nil {
+			return lastErr
 		}
 	}
 	c.InvalidateDirCache(sourceCID)

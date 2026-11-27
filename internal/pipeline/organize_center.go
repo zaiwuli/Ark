@@ -1084,15 +1084,16 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	type moveKey struct {
 		srcCID string
 		dstCID string
-		label  string
 	}
 	moveBatches := make(map[moveKey][]OrganizeItem)
+	moveLabels := make(map[moveKey]string)
 
 	for _, it := range cloudMoves {
 		if ctx.Err() != nil {
 			return
 		}
 		var dstCID string
+		var dstGroupLabel string
 		var err error
 		if it.Tool == "date_archive" {
 			histRoot, hErr := ensureCloudHistory()
@@ -1101,6 +1102,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			} else {
 				cat := sanitizeArchiveCatName(it.TargetName)
 				yearDir, monthDir, _ := historyTargetRel(cat, it.DateStr)
+				dstGroupLabel = fmt.Sprintf("归档区/历史归档/%s/%s/%s", cat, yearDir, monthDir)
 				ck := "hist:" + cat + "/" + yearDir + "/" + monthDir
 				if cached, ok := folderCache[ck]; ok {
 					dstCID = cached
@@ -1119,6 +1121,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				}
 			}
 		} else {
+			dstGroupLabel = it.DestLabel
 			ck := "sub:" + it.RootCID + "/" + it.DestSubdir
 			if cached, ok := folderCache[ck]; ok {
 				dstCID = cached
@@ -1136,8 +1139,11 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			doneCount++
 			continue
 		}
-		mk := moveKey{srcCID: it.SourceCID, dstCID: dstCID, label: it.DestLabel}
+		mk := moveKey{srcCID: it.SourceCID, dstCID: dstCID}
 		moveBatches[mk] = append(moveBatches[mk], it)
+		if _, ok := moveLabels[mk]; !ok {
+			moveLabels[mk] = dstGroupLabel
+		}
 	}
 
 	// Deterministic batch order
@@ -1145,21 +1151,22 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	for k := range moveBatches {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].label < keys[j].label })
+	sort.Slice(keys, func(i, j int) bool { return moveLabels[keys[i]] < moveLabels[keys[j]] })
 
 	for _, mk := range keys {
 		if ctx.Err() != nil {
 			return
 		}
 		grp := moveBatches[mk]
+		lbl := moveLabels[mk]
 		fids := make([]string, 0, len(grp))
 		for _, it := range grp {
 			fids = append(fids, it.FID)
 		}
-		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("批量移动 %d 项 → %s…", len(fids), mk.label))
+		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("批量移动 %d 项 → %s…", len(fids), lbl))
 		if err := cloud.BatchMove(ctx, mk.srcCID, fids, mk.dstCID); err != nil {
 			res.FailedCount += len(grp)
-			res.Errors = append(res.Errors, mk.label+": "+err.Error())
+			res.Errors = append(res.Errors, lbl+": "+err.Error())
 			s.center.addLog(fmt.Sprintf("115 批量移动 %d 项失败：%s", len(fids), err.Error()))
 		} else {
 			res.MovedCount += len(grp)
@@ -1169,7 +1176,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 					s.invalidateDateCache(it.SourceCID, it.DateStr)
 				}
 			}
-			s.center.addLog(fmt.Sprintf("115 批量移动成功：%d 项 → %s", len(fids), mk.label))
+			s.center.addLog(fmt.Sprintf("115 批量移动成功：%d 项 → %s", len(fids), lbl))
 		}
 		doneCount += len(grp)
 	}
