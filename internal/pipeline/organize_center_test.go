@@ -113,4 +113,28 @@ func TestOrganizeCenterCustomTargetsScanAndBatchExec(t *testing.T) {
 	if len(mock.Moved) != 1 || len(mock.Deleted) != 2 {
 		t.Fatalf("expected 1 cloud batch move + 2 cloud batch deletes, got moved=%v deleted=%v", mock.Moved, mock.Deleted)
 	}
+
+	// 4. When both EnableDateArchive and EnableEmptyDir are checked, an empty old date folder goes to empty_dir (delete) instead of date_archive.
+	mock.Listings["custom_cid_1"] = []p115.CloudFile{
+		{FID: "d_empty_date", CID: "custom_cid_1", Name: "2026-10-02", IsDir: true},
+	}
+	mock.Listings["d_empty_date"] = []p115.CloudFile{}
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:        []string{"custom:" + ctCloud.ID},
+		EnableDateArchive: true,
+		EnableEmptyDir:    true,
+	}); err != nil {
+		t.Fatalf("StartCenterScan empty date: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stSnap = svc.CenterJobState()
+		if stSnap.Status != "running" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if stSnap.Status != "done" || stSnap.Plan == nil || stSnap.Plan.Counts["empty_dir"] != 1 || stSnap.Plan.Counts["date_archive"] != 0 {
+		t.Fatalf("expected empty old date dir routed to empty_dir, got counts=%+v", stSnap.Plan.Counts)
+	}
 }

@@ -513,6 +513,23 @@ func (s *Service) scanCloudCenterTarget(
 					if activeDates[f.Name] || activeCIDs[f.FID] {
 						continue
 					}
+					if req.EnableEmptyDir {
+						if sub, subErr := cloud.Files(ctx, f.FID, 0); subErr == nil && len(sub.Files) == 0 {
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "empty_dir",
+								Scope:      "cloud",
+								TargetName: t.Name,
+								Name:       f.Name,
+								Detail:     "空日期目录（昨日及以前）",
+								Action:     "delete",
+								DestLabel:  "移入 115 回收站",
+								SourceCID:  cur.cid,
+								FID:        f.FID,
+							})
+							continue
+						}
+					}
 					_, _, dispTarget := historyTargetRel(catName, f.Name)
 					out = append(out, OrganizeItem{
 						ID:         makeID(),
@@ -694,6 +711,22 @@ func (s *Service) scanLocalCenterTarget(
 				if cur.depth == 0 && req.EnableDateArchive && strictDateDirRe.MatchString(e.Name()) && e.Name() < todayStr {
 					if activeDates[e.Name()] {
 						continue
+					}
+					if req.EnableEmptyDir {
+						if children, rErr := os.ReadDir(full); rErr == nil && len(children) == 0 {
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "empty_dir",
+								Scope:      "local",
+								TargetName: t.Name,
+								Name:       e.Name(),
+								Detail:     "空日期目录（昨日及以前）",
+								Action:     "delete",
+								DestLabel:  "删除空目录",
+								SourcePath: full,
+							})
+							continue
+						}
 					}
 					_, _, dispTarget := historyTargetRel(catName, e.Name())
 					out = append(out, OrganizeItem{
