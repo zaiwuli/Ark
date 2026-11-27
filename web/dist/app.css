@@ -680,8 +680,8 @@ code { font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; border-
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--border);
-  padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
-  grid-template-columns: repeat(5, 1fr);
+  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 .m-tab {
   display: flex;
@@ -690,6 +690,7 @@ code { font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; border-
   justify-content: center;
   gap: 3px;
   min-height: 44px;
+  min-width: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -697,6 +698,7 @@ code { font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; border-
   font-weight: 500;
   font-family: inherit;
   padding: 2px 0;
+  white-space: nowrap;
   transition: color 150ms ease;
 }
 .m-tab svg { width: 20px; height: 20px; }

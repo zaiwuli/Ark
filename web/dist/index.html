@@ -333,11 +333,11 @@
           </div>
         </section>
 
-        <!-- VIEW 3.5: Organize Center (Independent Primary Tab) -->
+        <!-- VIEW 3.5: Organize Center (Minimalist Primary Tab) -->
         <section id="view-organize" class="view">
           <div class="sub-tabs" role="tablist" aria-label="目录整理分页">
-            <button type="button" class="sub-tab active" data-sub="org-center-pane" onclick="switchSubTab('organize', 'org-center-pane', this)">交互式整理中心</button>
-            <button type="button" class="sub-tab" data-sub="org-auto-pane" onclick="switchSubTab('organize', 'org-auto-pane', this)">定期自动整理策略</button>
+            <button type="button" class="sub-tab active" data-sub="org-center-pane" onclick="switchSubTab('organize', 'org-center-pane', this)">手动整理</button>
+            <button type="button" class="sub-tab" data-sub="org-auto-pane" onclick="switchSubTab('organize', 'org-auto-pane', this)">自动归档</button>
           </div>
 
           <div id="org-center-pane" class="sub-pane active">
@@ -345,36 +345,38 @@
               <div class="panel-header">
                 <h2 class="panel-title">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                  <span>1. 选择整理目标（支持保存自定义 115 CID / 本地路径）</span>
+                  <span>目录整理</span>
                 </h2>
-                <span class="field-help">一次扫描复用快照 · 115 批量 50 项防风控</span>
+                <div class="toolbar">
+                  <button type="button" id="oc-scan-btn" class="btn btn-primary btn-sm" onclick="startCenterScan(this)">扫描预览</button>
+                  <button type="button" id="oc-cancel-btn" class="btn btn-danger btn-sm" style="display:none;" onclick="cancelCenterJob(this)">停止</button>
+                </div>
               </div>
               <div class="panel-body">
-                <div class="field-help"><strong>勾选本次要扫描整理的目录：</strong></div>
-                <div id="oc-target-checks" class="toggle-row" style="margin-top:8px;"></div>
+                <div id="oc-target-checks" class="toggle-row"></div>
 
-                <details class="details-box" style="margin-top:14px;">
-                  <summary>➕ 添加 / 管理自定义整理目录（115 CID 或本地路径）</summary>
+                <details class="details-box" style="margin-top:12px;">
+                  <summary>+ 自定义整理目录（115 CID / 本地路径）</summary>
                   <div class="form-grid" style="margin-top:10px;">
                     <div class="field">
-                      <label for="ot-name">目录名称</label>
-                      <input id="ot-name" type="text" placeholder="例如：影视收藏 / 杂物堆" />
+                      <label for="ot-name">名称</label>
+                      <input id="ot-name" type="text" placeholder="如：影视收藏" />
                     </div>
                     <div class="field">
-                      <label for="ot-kind">位置类型</label>
+                      <label for="ot-kind">类型</label>
                       <select id="ot-kind">
-                        <option value="cloud">115 云目录（CID）</option>
-                        <option value="local">本地 NAS 目录</option>
+                        <option value="cloud">115 云目录</option>
+                        <option value="local">本地目录</option>
                       </select>
                     </div>
                     <div class="field">
-                      <label for="ot-target">115 CID 或本地路径</label>
-                      <input id="ot-target" type="text" placeholder="云端填数字 CID，本地填如 /data/整理" />
+                      <label for="ot-target">CID 或路径</label>
+                      <input id="ot-target" type="text" placeholder="数字 CID 或 /data/..." />
                     </div>
                     <div class="field">
-                      <label for="ot-depth">扫描深度（默认 1 层防风控）</label>
+                      <label for="ot-depth">深度</label>
                       <select id="ot-depth">
-                        <option value="1">1 层（仅当前层，推荐）</option>
+                        <option value="1">1 层</option>
                         <option value="2">2 层</option>
                         <option value="3">3 层</option>
                         <option value="4">4 层</option>
@@ -383,93 +385,76 @@
                     </div>
                   </div>
                   <div class="toolbar" style="margin-top:10px;">
-                    <button type="button" class="btn btn-primary btn-sm" onclick="addOrganizeTarget(this)">保存为整理目标</button>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="addOrganizeTarget(this)">保存目标</button>
                   </div>
                   <div id="oc-custom-list" style="margin-top:10px;"></div>
                 </details>
-              </div>
-            </div>
 
-            <div class="panel" style="margin-top:14px;">
-              <div class="panel-header">
-                <h2 class="panel-title">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-                  <span>2. 勾选整理工具与扫描预览</span>
-                </h2>
-              </div>
-              <div class="panel-body">
-                <div class="toggle-row">
-                  <label class="check-label"><input id="oc-tool-date" type="checkbox" checked /> 📅 日期目录归档（昨日及以前）</label>
-                  <label class="check-label"><input id="oc-tool-dup" type="checkbox" checked /> 👯 SHA1 重复文件查重（零额外请求）</label>
-                  <label class="check-label"><input id="oc-tool-junk" type="checkbox" /> 🧹 广告/垃圾文件清理</label>
-                  <label class="check-label"><input id="oc-tool-cls" type="checkbox" /> 🗂️ 散落文件一键归类</label>
-                  <label class="check-label"><input id="oc-tool-empty" type="checkbox" /> 📂 空目录清理（需额外探测）</label>
+                <div class="toggle-row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+                  <label class="check-label"><input id="oc-tool-date" type="checkbox" checked /> 📅 日期归档</label>
+                  <label class="check-label"><input id="oc-tool-dup" type="checkbox" checked /> 👯 SHA1查重</label>
+                  <label class="check-label"><input id="oc-tool-junk" type="checkbox" onchange="toggleOcRuleFields()" /> 🧹 垃圾清理</label>
+                  <label class="check-label"><input id="oc-tool-cls" type="checkbox" onchange="toggleOcRuleFields()" /> 🗂️ 文件归类</label>
+                  <label class="check-label"><input id="oc-tool-empty" type="checkbox" /> 📂 空目录</label>
                 </div>
-                <div class="form-grid" style="margin-top:12px;">
-                  <div class="field">
-                    <label for="oc-junk-exts">垃圾扩展名（逗号分隔）</label>
+
+                <div id="oc-extra-opts" class="form-grid" style="display:none;margin-top:12px;">
+                  <div class="field" id="oc-junk-exts-wrap" style="display:none;">
+                    <label for="oc-junk-exts">垃圾扩展名</label>
                     <input id="oc-junk-exts" type="text" value=".txt,.url,.html,.htm,.apk,.nfo,.lnk" />
                   </div>
-                  <div class="field">
-                    <label for="oc-junk-mb">清理小于此体积的文件（MB，0 表示不限）</label>
+                  <div class="field" id="oc-junk-mb-wrap" style="display:none;">
+                    <label for="oc-junk-mb">小于此体积(MB，0不限)</label>
                     <input id="oc-junk-mb" type="number" min="0" step="0.5" value="0" />
                   </div>
-                  <div class="field">
-                    <label for="oc-cls-mode">散落文件归类方式</label>
+                  <div class="field" id="oc-cls-mode-wrap" style="display:none;">
+                    <label for="oc-cls-mode">归类方式</label>
                     <select id="oc-cls-mode">
-                      <option value="type">按文件类型（视频 / 图片 / 压缩包 / 文档 / 音频）</option>
-                      <option value="month">按修改月份（YYYY-MM）</option>
+                      <option value="type">按文件类型</option>
+                      <option value="month">按修改月份</option>
                     </select>
                   </div>
                 </div>
-                <div class="toolbar" style="margin-top:14px;">
-                  <button type="button" id="oc-scan-btn" class="btn btn-primary" onclick="startCenterScan(this)">开始扫描预览（后台异步）</button>
-                  <button type="button" id="oc-cancel-btn" class="btn btn-danger" style="display:none;" onclick="cancelCenterJob(this)">停止当前任务</button>
-                </div>
 
                 <!-- Live Progress & Logs -->
-                <div id="oc-progress-wrap" style="display:none;margin-top:14px;padding:12px;border-radius:10px;background:var(--surface-elevated);border:1px solid var(--border);">
-                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
-                    <strong id="oc-stage-label">准备中…</strong>
+                <div id="oc-progress-wrap" style="display:none;margin-top:14px;padding:10px 12px;border-radius:10px;background:var(--surface-elevated);border:1px solid var(--border);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
+                    <strong id="oc-stage-label" style="font-size:13px;">准备中…</strong>
                     <span id="oc-status-badge" class="badge badge-info">运行中</span>
                   </div>
-                  <div class="progress-track" style="height:8px;margin-bottom:10px;">
+                  <div class="progress-track" style="height:6px;margin-bottom:8px;">
                     <div id="oc-progress-fill" class="progress-fill" style="width:0%"></div>
                   </div>
-                  <pre id="oc-logs" style="margin:0;max-height:160px;overflow:auto;font-size:12px;line-height:1.5;font-family:var(--font-mono);color:var(--text-secondary);white-space:pre-wrap;"></pre>
+                  <pre id="oc-logs" style="margin:0;max-height:140px;overflow:auto;font-size:11.5px;line-height:1.5;font-family:var(--font-mono);color:var(--text-secondary);white-space:pre-wrap;"></pre>
                 </div>
               </div>
             </div>
 
             <!-- Scan Plan & Checkable Execution -->
-            <div id="oc-plan-panel" class="panel" style="display:none;margin-top:14px;">
+            <div id="oc-plan-panel" class="panel" style="display:none;margin-top:12px;">
               <div class="panel-header">
-                <h2 class="panel-title">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-                  <span>3. 预览清单（可逐条勾选后执行）</span>
-                </h2>
+                <h2 class="panel-title"><span>预览清单</span></h2>
                 <div class="toolbar">
-                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(true)">全选当前页</button>
-                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(false)">取消全选</button>
-                  <button type="button" id="oc-exec-btn" class="btn btn-warn btn-sm" onclick="startCenterExec(this)">执行勾选的 0 项</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(true)">全选</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(false)">清空</button>
+                  <button type="button" id="oc-exec-btn" class="btn btn-warn btn-sm" onclick="startCenterExec(this)">执行 0 项</button>
                 </div>
               </div>
               <div class="panel-body">
-                <div class="sub-tabs" id="oc-tool-tabs" style="margin-bottom:12px;">
+                <div class="sub-tabs" id="oc-tool-tabs" style="margin-bottom:10px;">
                   <button type="button" class="sub-tab active" data-tool="all" onclick="switchCenterToolTab('all', this)">全部 (<span id="oc-cnt-all">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="date_archive" onclick="switchCenterToolTab('date_archive', this)">日期归档 (<span id="oc-cnt-date_archive">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="duplicate" onclick="switchCenterToolTab('duplicate', this)">SHA1查重 (<span id="oc-cnt-duplicate">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="junk" onclick="switchCenterToolTab('junk', this)">广告垃圾 (<span id="oc-cnt-junk">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="classify" onclick="switchCenterToolTab('classify', this)">文件归类 (<span id="oc-cnt-classify">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="date_archive" onclick="switchCenterToolTab('date_archive', this)">日期 (<span id="oc-cnt-date_archive">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="duplicate" onclick="switchCenterToolTab('duplicate', this)">查重 (<span id="oc-cnt-duplicate">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="junk" onclick="switchCenterToolTab('junk', this)">垃圾 (<span id="oc-cnt-junk">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="classify" onclick="switchCenterToolTab('classify', this)">归类 (<span id="oc-cnt-classify">0</span>)</button>
                   <button type="button" class="sub-tab" data-tool="empty_dir" onclick="switchCenterToolTab('empty_dir', this)">空目录 (<span id="oc-cnt-empty_dir">0</span>)</button>
                 </div>
                 <div class="table-wrap">
                   <table>
-                    <thead><tr><th style="width:36px;">选</th><th>类型</th><th>所属目录</th><th>文件 / 文件夹</th><th>说明</th><th>目标去向</th></tr></thead>
+                    <thead><tr><th style="width:32px;">选</th><th>类型</th><th>目录</th><th>对象</th><th>说明</th><th>去向</th></tr></thead>
                     <tbody id="oc-plan-list"></tbody>
                   </table>
                 </div>
-                <div class="field-help" style="margin-top:10px;">安全提示：115 清理全部进入官方回收站（可随时找回），批量操作自动按每批 50 项合并以防风控。</div>
               </div>
             </div>
           </div>
@@ -477,46 +462,37 @@
           <div id="org-auto-pane" class="sub-pane">
             <div class="panel">
               <div class="panel-header">
-                <h2 class="panel-title">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                  <span>定期自动整理策略（后台静默归并）</span>
-                </h2>
-                <span class="field-help">旧日期目录一步折叠进「归档区/历史归档/分类/YYYY年/YYYY-MM/」</span>
+                <h2 class="panel-title"><span>定期自动归档</span></h2>
               </div>
               <div class="panel-body">
                 <div class="form-grid">
                   <div class="field">
-                    <label for="org-mode">自动整理保留方式</label>
+                    <label for="org-mode">保留方式</label>
                     <select id="org-mode" onchange="toggleRetentionDays()">
-                      <option value="current_month">保留当月全部（收拢上月及更早日期，推荐）</option>
-                      <option value="days">保留最近 N 天不动</option>
+                      <option value="current_month">保留当月（推荐）</option>
+                      <option value="days">保留最近 N 天</option>
                     </select>
                   </div>
                   <div class="field" id="org-days-wrap" style="display:none;">
-                    <label for="org-days">保留天数（天）</label>
+                    <label for="org-days">保留天数</label>
                     <input id="org-days" type="number" min="1" max="365" value="14" />
                   </div>
                 </div>
-                <div class="field-help" style="margin-top:12px;"><strong>自动整理勾选的 115 系统目录：</strong></div>
-                <div class="toggle-row" style="margin-top:6px;">
+                <div class="toggle-row" style="margin-top:12px;">
                   <label class="check-label"><input id="org-c-offline" type="checkbox" checked /> 115 离线下载</label>
                   <label class="check-label"><input id="org-c-output" type="checkbox" checked /> 115 解压输出</label>
                   <label class="check-label"><input id="org-c-archive" type="checkbox" checked /> 115 原包留存</label>
-                </div>
-                <div class="field-help" style="margin-top:12px;"><strong>自动整理勾选的本地 NAS 系统目录：</strong></div>
-                <div class="toggle-row" style="margin-top:6px;">
                   <label class="check-label"><input id="org-l-watch" type="checkbox" /> 本地监控</label>
                   <label class="check-label"><input id="org-l-output" type="checkbox" checked /> 本地解压输出</label>
                   <label class="check-label"><input id="org-l-archive" type="checkbox" checked /> 本地原包留存</label>
                 </div>
-                <div class="field-help" style="margin-top:12px;"><strong>自动整理勾选的额外监控来源：</strong></div>
-                <div id="org-extra-sources" class="toggle-row" style="margin-top:6px;"></div>
-                <div class="toggle-row" style="margin-top:14px;">
-                  <label class="check-label"><input id="org-empty" type="checkbox" checked /> 顺手清理旧的空日期目录</label>
-                  <label class="check-label"><input id="org-auto" type="checkbox" /> 启用定期自动整理（后台静默归并并推送汇总）</label>
+                <div id="org-extra-sources" class="toggle-row" style="margin-top:8px;"></div>
+                <div class="toggle-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+                  <label class="check-label"><input id="org-empty" type="checkbox" checked /> 清理空目录</label>
+                  <label class="check-label"><input id="org-auto" type="checkbox" /> 启用定期自动整理</label>
                 </div>
-                <div class="toolbar" style="margin-top:16px;">
-                  <button type="button" class="btn btn-primary" onclick="saveOrganizerConfig(this)">保存自动整理策略</button>
+                <div class="toolbar" style="margin-top:14px;">
+                  <button type="button" class="btn btn-primary" onclick="saveOrganizerConfig(this)">保存策略</button>
                 </div>
               </div>
             </div>

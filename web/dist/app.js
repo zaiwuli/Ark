@@ -1391,9 +1391,22 @@ function toggleCenterAll(checked) {
   renderCenterPlanTable();
 }
 
+function toggleOcRuleFields() {
+  const showJunk = !!document.getElementById('oc-tool-junk')?.checked;
+  const showCls = !!document.getElementById('oc-tool-cls')?.checked;
+  const wrap = document.getElementById('oc-extra-opts');
+  if (wrap) wrap.style.display = (showJunk || showCls) ? 'grid' : 'none';
+  const j1 = document.getElementById('oc-junk-exts-wrap');
+  const j2 = document.getElementById('oc-junk-mb-wrap');
+  const c1 = document.getElementById('oc-cls-mode-wrap');
+  if (j1) j1.style.display = showJunk ? 'flex' : 'none';
+  if (j2) j2.style.display = showJunk ? 'flex' : 'none';
+  if (c1) c1.style.display = showCls ? 'flex' : 'none';
+}
+
 function updateCenterExecBtn() {
   const btn = document.getElementById('oc-exec-btn');
-  if (btn) btn.textContent = `执行勾选的 ${ocState.checkedIds.size} 项`;
+  if (btn) btn.textContent = `执行 ${ocState.checkedIds.size} 项`;
 }
 
 function renderCenterPlanTable() {
