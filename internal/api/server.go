@@ -127,6 +127,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/v1/organizer/config", s.requireRole("admin", s.handlePutOrganizerConfig))
 	s.mux.HandleFunc("POST /api/v1/organizer/preview", s.requireRole("admin", s.handlePreviewOrganize))
 	s.mux.HandleFunc("POST /api/v1/organizer/run", s.requireRole("admin", s.handleRunOrganize))
+	s.mux.HandleFunc("GET /api/v1/organizer/targets", s.requireRole("admin", s.handleListOrganizeTargets))
+	s.mux.HandleFunc("POST /api/v1/organizer/targets", s.requireRole("admin", s.handleUpsertOrganizeTarget))
+	s.mux.HandleFunc("DELETE /api/v1/organizer/targets/{id}", s.requireRole("admin", s.handleDeleteOrganizeTarget))
+	s.mux.HandleFunc("POST /api/v1/organizer/center/scan", s.requireRole("admin", s.handleCenterScan))
+	s.mux.HandleFunc("POST /api/v1/organizer/center/exec", s.requireRole("admin", s.handleCenterExec))
+	s.mux.HandleFunc("GET /api/v1/organizer/center/state", s.requireRole("readonly", s.handleCenterState))
+	s.mux.HandleFunc("POST /api/v1/organizer/center/cancel", s.requireRole("admin", s.handleCenterCancel))
 
 	// Sources & Rules
 	s.mux.HandleFunc("GET /api/v1/sources", s.requireRole("readonly", s.handleListSources))

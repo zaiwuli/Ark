@@ -17,6 +17,7 @@ const TAB_TITLES = {
   tasks: '任务中心',
   import: '离线导入',
   sources: '来源与规则',
+  organize: '目录整理中心',
   logs: '工作日志',
   settings: '系统设置',
 };
@@ -227,9 +228,10 @@ function switchTab(tab) {
   document.getElementById('page-title').textContent = TAB_TITLES[tab] || '方舟';
 
   if (tab === 'tasks') loadPipelines();
-  if (tab === 'sources') { loadSources(); loadArchiveRule(); loadSeedRule(); }
+  if (tab === 'sources') { loadSources(); loadArchiveRule(); }
+  if (tab === 'organize') { loadOrganizeCenter(); loadOrganizerConfig(); }
   if (tab === 'logs') loadLogs();
-  if (tab === 'settings') { loadP115(); loadTelegram(); loadWebhook(); loadPasswords(); loadTokens(); loadOrganizerConfig(); refreshTelemetry(true); }
+  if (tab === 'settings') { loadP115(); loadTelegram(); loadWebhook(); loadPasswords(); loadTokens(); refreshTelemetry(true); }
 }
 
 function switchSubTab(viewName, paneId, btn) {
@@ -238,7 +240,8 @@ function switchSubTab(viewName, paneId, btn) {
   view.querySelectorAll('.sub-pane').forEach((p) => p.classList.toggle('active', p.id === paneId));
   view.querySelectorAll('.sub-tab').forEach((b) => b.classList.toggle('active', b === btn || b.dataset.sub === paneId));
   if (paneId === 'set-status') { refreshTelemetry(true); loadMaintenance(); }
-  if (paneId === 'set-organize') loadOrganizerConfig();
+  if (paneId === 'org-auto-pane') loadOrganizerConfig();
+  if (paneId === 'org-center-pane') loadOrganizeCenter();
   if (paneId === 'archive-rule-pane') loadArchiveRule();
 }
 
@@ -1142,6 +1145,275 @@ async function delToken(id) {
   await fetch('/api/v1/tokens/' + encodeURIComponent(id), { method: 'DELETE' });
   showToast('接口令牌已撤销');
   loadTokens();
+}
+
+/* Organize Center — Async 5-in-1 Scan, Live Logs, Custom CID/Path Targets, Batch Exec */
+const ocState = {
+  toolTab: 'all',
+  plan: null,
+  checkedIds: new Set(),
+  pollTimer: null,
+  lastPlanTs: 0,
+};
+
+const OC_TOOL_LABEL = {
+  date_archive: ['日期归档', 'badge-info'],
+  duplicate: ['SHA1查重', 'badge-warn'],
+  junk: ['广告垃圾', 'badge-err'],
+  classify: ['文件归类', 'badge-ok'],
+  empty_dir: ['空目录', 'badge-muted'],
+};
+
+async function loadOrganizeCenter() {
+  try {
+    const [srcResp, customResp, st] = await Promise.all([
+      fetch('/api/v1/sources').then((r) => r.json()).catch(() => ({ items: [] })),
+      fetch('/api/v1/organizer/targets').then((r) => r.json()).catch(() => ({ items: [] })),
+      fetch('/api/v1/organizer/center/state').then((r) => r.json()).catch(() => null),
+    ]);
+    const prevChecked = new Set(Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((e) => e.value));
+    const hasPrev = document.querySelectorAll('.oc-target-cb').length > 0;
+
+    const sysList = [
+      { key: 'sys:cloud:offline', label: '[115] 离线下载', def: true },
+      { key: 'sys:cloud:output', label: '[115] 解压输出', def: true },
+      { key: 'sys:cloud:archive', label: '[115] 原包留存', def: true },
+      { key: 'sys:local:output', label: '[本地] 解压输出', def: true },
+      { key: 'sys:local:archive', label: '[本地] 原包留存', def: false },
+      { key: 'sys:local:watch', label: '[本地] 本地监控', def: false },
+    ];
+    const sources = (srcResp.items || []).map((s) => ({
+      key: 'src:' + s.id,
+      label: `[${s.kind === 'cloud' ? '115监控' : '本地监控'}] ${s.name}`,
+      def: false,
+    }));
+    const customs = (customResp.items || []).map((c) => ({
+      key: 'custom:' + c.id,
+      label: `[${c.kind === 'cloud' ? '115自定义' : '本地自定义'}] ${c.name} (${c.depth || 1}层)`,
+      def: true,
+    }));
+
+    const allTargets = [...sysList, ...sources, ...customs];
+    const wrap = document.getElementById('oc-target-checks');
+    if (wrap) {
+      wrap.innerHTML = allTargets.map((t) => {
+        const checked = hasPrev ? prevChecked.has(t.key) : t.def;
+        return `<label class="check-label"><input type="checkbox" class="oc-target-cb" value="${esc(t.key)}" ${checked ? 'checked' : ''} /> ${esc(t.label)}</label>`;
+      }).join('');
+    }
+
+    const customWrap = document.getElementById('oc-custom-list');
+    if (customWrap) {
+      const items = customResp.items || [];
+      customWrap.innerHTML = items.length ? `
+        <div class="table-wrap"><table>
+          <thead><tr><th>名称</th><th>类型</th><th>CID / 路径</th><th>深度</th><th style="text-align:right;">操作</th></tr></thead>
+          <tbody>${items.map((c) => `
+            <tr>
+              <td><strong>${esc(c.name)}</strong></td>
+              <td><span class="badge ${c.kind === 'cloud' ? 'badge-ok' : 'badge-info'}">${c.kind === 'cloud' ? '115 云' : '本地'}</span></td>
+              <td><code>${esc(c.target)}</code></td>
+              <td>${c.depth || 1} 层</td>
+              <td style="text-align:right;"><button type="button" class="btn btn-danger btn-sm" onclick="deleteOrganizeTarget('${esc(c.id)}')">删除</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="field-help">尚未保存自定义整理目录。</div>';
+    }
+
+    if (st) renderCenterState(st);
+  } catch {}
+}
+
+async function addOrganizeTarget(btn) {
+  const name = document.getElementById('ot-name').value.trim();
+  const kind = document.getElementById('ot-kind').value;
+  const target = document.getElementById('ot-target').value.trim();
+  const depth = Number(document.getElementById('ot-depth').value) || 1;
+  if (!name || !target) return showToast('请填写目录名称与 CID 或路径');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/targets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, kind, target, depth }),
+    });
+    if (!r.ok) return showToast('保存自定义目标失败');
+    document.getElementById('ot-name').value = '';
+    document.getElementById('ot-target').value = '';
+    showToast('已保存整理目标：' + name);
+    loadOrganizeCenter();
+  } finally { btn.disabled = false; }
+}
+
+async function deleteOrganizeTarget(id) {
+  await fetch('/api/v1/organizer/targets/' + encodeURIComponent(id), { method: 'DELETE' });
+  showToast('已删除自定义目标');
+  loadOrganizeCenter();
+}
+
+async function startCenterScan(btn) {
+  const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
+  if (!target_keys.length) return showToast('请先至少勾选一个要扫描的目录');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/center/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_keys,
+        enable_date_archive: document.getElementById('oc-tool-date').checked,
+        enable_duplicate: document.getElementById('oc-tool-dup').checked,
+        enable_junk: document.getElementById('oc-tool-junk').checked,
+        junk_exts: document.getElementById('oc-junk-exts').value.trim(),
+        junk_max_mb: Number(document.getElementById('oc-junk-mb').value) || 0,
+        enable_classify: document.getElementById('oc-tool-cls').checked,
+        classify_mode: document.getElementById('oc-cls-mode').value,
+        enable_empty_dir: document.getElementById('oc-tool-empty').checked,
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '启动扫描失败');
+    showToast('后台扫描已启动，可实时查看进度与日志');
+    startCenterPolling();
+  } finally { btn.disabled = false; }
+}
+
+async function startCenterExec(btn) {
+  const ids = Array.from(ocState.checkedIds);
+  if (!ids.length) return showToast('请先勾选要执行的条目');
+  if (!confirm(`确认执行已勾选的 ${ids.length} 项整理操作？（115 删除默认移入回收站，批量 50 项防风控）`)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/center/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_ids: ids }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '启动执行失败');
+    showToast('后台批量整理已启动');
+    startCenterPolling();
+  } finally { btn.disabled = false; }
+}
+
+async function cancelCenterJob(btn) {
+  btn.disabled = true;
+  try {
+    await fetch('/api/v1/organizer/center/cancel', { method: 'POST' });
+    showToast('已发送停止指令');
+  } finally { btn.disabled = false; }
+}
+
+function startCenterPolling() {
+  clearInterval(ocState.pollTimer);
+  pollCenterState();
+  ocState.pollTimer = setInterval(pollCenterState, 1500);
+}
+
+async function pollCenterState() {
+  try {
+    const st = await fetch('/api/v1/organizer/center/state').then((r) => r.json());
+    renderCenterState(st);
+    if (st.status !== 'running') {
+      clearInterval(ocState.pollTimer);
+      ocState.pollTimer = null;
+    }
+  } catch {}
+}
+
+function renderCenterState(st) {
+  const wrap = document.getElementById('oc-progress-wrap');
+  const cancelBtn = document.getElementById('oc-cancel-btn');
+  const scanBtn = document.getElementById('oc-scan-btn');
+  if (!wrap) return;
+
+  const active = st.status === 'running';
+  if (st.status && st.status !== 'idle') {
+    wrap.style.display = 'block';
+    document.getElementById('oc-stage-label').textContent = st.stage_label || '处理中…';
+    const badge = document.getElementById('oc-status-badge');
+    const stMap = { running: ['运行中', 'badge-info'], done: ['已完成', 'badge-ok'], cancelled: ['已停止', 'badge-warn'], failed: ['失败', 'badge-err'] };
+    const [lbl, cls] = stMap[st.status] || ['空闲', 'badge-muted'];
+    badge.textContent = lbl;
+    badge.className = 'badge ' + cls;
+    const pct = st.progress_total > 0 ? Math.min(100, Math.round((st.progress_cur / st.progress_total) * 100)) : (active ? 15 : 100);
+    document.getElementById('oc-progress-fill').style.width = pct + '%';
+    const logEl = document.getElementById('oc-logs');
+    logEl.textContent = (st.logs || []).join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  if (cancelBtn) cancelBtn.style.display = active ? 'inline-flex' : 'none';
+  if (scanBtn) scanBtn.disabled = active;
+  if (active && !ocState.pollTimer) startCenterPolling();
+
+  const planPanel = document.getElementById('oc-plan-panel');
+  if (st.plan && Array.isArray(st.plan.items)) {
+    ocState.plan = st.plan;
+    if (st.plan.generated_at && st.plan.generated_at !== ocState.lastPlanTs) {
+      ocState.lastPlanTs = st.plan.generated_at;
+      ocState.checkedIds = new Set(st.plan.items.map((x) => x.id));
+    } else {
+      const validIds = new Set(st.plan.items.map((x) => x.id));
+      for (const id of Array.from(ocState.checkedIds)) {
+        if (!validIds.has(id)) ocState.checkedIds.delete(id);
+      }
+    }
+    planPanel.style.display = 'block';
+    const counts = st.plan.counts || {};
+    document.getElementById('oc-cnt-all').textContent = st.plan.items.length;
+    ['date_archive', 'duplicate', 'junk', 'classify', 'empty_dir'].forEach((k) => {
+      const el = document.getElementById('oc-cnt-' + k);
+      if (el) el.textContent = counts[k] || 0;
+    });
+    renderCenterPlanTable();
+  }
+}
+
+function switchCenterToolTab(tool, btn) {
+  ocState.toolTab = tool;
+  document.querySelectorAll('#oc-tool-tabs .sub-tab').forEach((b) => b.classList.toggle('active', b === btn));
+  renderCenterPlanTable();
+}
+
+function toggleCenterItem(id, checked) {
+  if (checked) ocState.checkedIds.add(id);
+  else ocState.checkedIds.delete(id);
+  updateCenterExecBtn();
+}
+
+function toggleCenterAll(checked) {
+  if (!ocState.plan) return;
+  const items = ocState.plan.items.filter((x) => ocState.toolTab === 'all' || x.tool === ocState.toolTab);
+  items.forEach((x) => {
+    if (checked) ocState.checkedIds.add(x.id);
+    else ocState.checkedIds.delete(x.id);
+  });
+  renderCenterPlanTable();
+}
+
+function updateCenterExecBtn() {
+  const btn = document.getElementById('oc-exec-btn');
+  if (btn) btn.textContent = `执行勾选的 ${ocState.checkedIds.size} 项`;
+}
+
+function renderCenterPlanTable() {
+  const tbody = document.getElementById('oc-plan-list');
+  if (!tbody || !ocState.plan) return;
+  const items = ocState.plan.items.filter((x) => ocState.toolTab === 'all' || x.tool === ocState.toolTab);
+  tbody.innerHTML = items.length ? items.map((it) => {
+    const [tlbl, tcls] = OC_TOOL_LABEL[it.tool] || [it.tool, 'badge-muted'];
+    const checked = ocState.checkedIds.has(it.id) ? 'checked' : '';
+    return `
+      <tr>
+        <td><input type="checkbox" ${checked} onchange="toggleCenterItem('${esc(it.id)}', this.checked)" /></td>
+        <td><span class="badge ${tcls}">${tlbl}</span></td>
+        <td><span class="badge ${it.scope === 'cloud' ? 'badge-ok' : 'badge-info'}">${it.scope === 'cloud' ? '115' : '本地'}</span> ${esc(it.target_name)}</td>
+        <td><strong>${esc(it.name)}</strong>${it.size ? ` <span class="field-help">(${fmtSize(it.size)})</span>` : ''}</td>
+        <td>${esc(it.detail)}</td>
+        <td><code>${esc(it.dest_label)}</code></td>
+      </tr>`;
+  }).join('') : '<tr><td colspan="6" class="field-help">当前分类下暂无待整理项</td></tr>';
+  updateCenterExecBtn();
 }
 
 /* Date-Folder Organizer */

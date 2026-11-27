@@ -160,12 +160,17 @@ func (s *Service) PreviewOrganize(ctx context.Context) (OrganizePlan, error) {
 	return s.buildOrganizePlan(ctx, time.Now().In(s.loc), false)
 }
 
-// PreviewOrganizeWithMode produces a dry-run plan; when manual is true, yesterday and all earlier dates are included.
+// PreviewOrganizeWithMode produces a dry-run plan; when manual is true, yesterday and all earlier dates are included
+// and per-subfolder cloud empty checks are skipped for instant 1-2s preview (actual empty check happens on run).
 func (s *Service) PreviewOrganizeWithMode(ctx context.Context, manual bool) (OrganizePlan, error) {
-	return s.buildOrganizePlan(ctx, time.Now().In(s.loc), manual)
+	return s.buildOrganizePlanOpts(ctx, time.Now().In(s.loc), manual, !manual)
 }
 
 func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time, manual bool) (OrganizePlan, error) {
+	return s.buildOrganizePlanOpts(ctx, now, manual, true)
+}
+
+func (s *Service) buildOrganizePlanOpts(ctx context.Context, now time.Time, manual, probeCloudEmpty bool) (OrganizePlan, error) {
 	orgCfg := s.OrganizerConfig(ctx)
 	activeDates, activeCIDs, err := s.store.ActiveDatesAndCIDs(ctx)
 	if err != nil {
@@ -320,8 +325,11 @@ func (s *Service) buildOrganizePlan(ctx context.Context, now time.Time, manual b
 					plan.SkippedActive++
 					continue
 				}
-				sub, subErr := cloud.Files(ctx, f.FID, 0)
-				isEmpty := subErr == nil && len(sub.Files) == 0
+				isEmpty := false
+				if probeCloudEmpty && orgCfg.CleanEmpty {
+					sub, subErr := cloud.Files(ctx, f.FID, 0)
+					isEmpty = subErr == nil && len(sub.Files) == 0
+				}
 				_, _, dispTarget := historyTargetRel(cc.cat, f.Name)
 				if isEmpty && orgCfg.CleanEmpty {
 					plan.Actions = append(plan.Actions, OrganizeAction{

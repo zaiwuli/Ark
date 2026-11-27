@@ -159,3 +159,82 @@ func (s *Server) handleRunOrganize(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, res)
 }
+
+func (s *Server) handleListOrganizeTargets(w http.ResponseWriter, r *http.Request) {
+	items, err := s.pipeline.ListOrganizeTargets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleUpsertOrganizeTarget(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.OrganizeTarget
+	if err := decodeJSON(r, &req, 16*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	saved, err := s.pipeline.UpsertOrganizeTarget(r.Context(), req)
+	if errors.Is(err, store.ErrInvalid) {
+		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "name, kind (cloud/local), and target required")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"item": saved})
+}
+
+func (s *Server) handleDeleteOrganizeTarget(w http.ResponseWriter, r *http.Request) {
+	err := s.pipeline.DeleteOrganizeTarget(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "TARGET_NOT_FOUND", "target not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) handleCenterScan(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.CenterScanRequest
+	if err := decodeJSON(r, &req, 32*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	jobID, err := s.pipeline.StartCenterScan(req)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": jobID, "status": "running"})
+}
+
+func (s *Server) handleCenterExec(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ItemIDs []string `json:"item_ids"`
+	}
+	if err := decodeJSON(r, &req, 256*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	jobID, err := s.pipeline.StartCenterExec(req.ItemIDs)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": jobID, "status": "running"})
+}
+
+func (s *Server) handleCenterState(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.pipeline.CenterJobState())
+}
+
+func (s *Server) handleCenterCancel(w http.ResponseWriter, _ *http.Request) {
+	cancelled := s.pipeline.CancelCenterJob()
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled})
+}

@@ -101,6 +101,46 @@ func (m *MockClient) DeleteVerified(_ context.Context, loc FileLocator) error {
 	return nil
 }
 
+func (m *MockClient) BatchMove(_ context.Context, sourceCID string, fids []string, targetCID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fidSet := make(map[string]bool, len(fids))
+	for _, fid := range fids {
+		fidSet[fid] = true
+		m.Moved = append(m.Moved, fid+"->"+targetCID)
+	}
+	if list, ok := m.Listings[sourceCID]; ok {
+		filtered := list[:0]
+		for _, f := range list {
+			if !fidSet[f.FID] {
+				filtered = append(filtered, f)
+			}
+		}
+		m.Listings[sourceCID] = filtered
+	}
+	return nil
+}
+
+func (m *MockClient) BatchDelete(_ context.Context, sourceCID string, fids []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fidSet := make(map[string]bool, len(fids))
+	for _, fid := range fids {
+		fidSet[fid] = true
+		m.Deleted = append(m.Deleted, fid)
+	}
+	if list, ok := m.Listings[sourceCID]; ok {
+		filtered := list[:0]
+		for _, f := range list {
+			if !fidSet[f.FID] {
+				filtered = append(filtered, f)
+			}
+		}
+		m.Listings[sourceCID] = filtered
+	}
+	return nil
+}
+
 func (m *MockClient) SubmitOffline(_ context.Context, links []string, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

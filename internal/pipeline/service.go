@@ -83,6 +83,8 @@ type Service struct {
 	lastLifeRun   int64
 	lastLifeSeen  int64
 	lastCloudScan int64
+
+	center *organizeCenter
 }
 
 type ServiceOptions struct {
@@ -119,6 +121,7 @@ func NewServiceWithOptions(st *store.Store, opt ServiceOptions) *Service {
 		extractBin:       opt.ExtractBin,
 		extractMaxDictMB: opt.ExtractMaxDictMB,
 		dateCache:        make(map[string]string),
+		center:           newOrganizeCenter(),
 	}
 	_ = svc.ReloadP115(context.Background())
 	var paused bool

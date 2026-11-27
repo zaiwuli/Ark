@@ -45,6 +45,7 @@ type CloudFile struct {
 	Pickcode string `json:"pickcode"`
 	IsDir    bool   `json:"is_dir"`
 	SHA1     string `json:"sha1"`
+	ModTime  int64  `json:"mod_time,omitempty"`
 }
 
 type FilePage struct {
@@ -99,6 +100,8 @@ type Port interface {
 	EnsureFolder(ctx context.Context, parentCID, name string) (string, error)
 	MoveVerified(ctx context.Context, loc FileLocator, targetCID string) error
 	DeleteVerified(ctx context.Context, loc FileLocator) error
+	BatchMove(ctx context.Context, sourceCID string, fids []string, targetCID string) error
+	BatchDelete(ctx context.Context, sourceCID string, fids []string) error
 	SubmitOffline(ctx context.Context, links []string, targetCID string) error
 	OfflineSnapshot(ctx context.Context) ([]OfflineTask, error)
 	PrepareExtract(ctx context.Context, pickcode, secret string) (string, error)
@@ -483,6 +486,10 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 		if isDir {
 			id = dirCID
 		}
+		modTime := asInt64(m["te"])
+		if modTime <= 0 {
+			modTime = asInt64(m["tp"])
+		}
 		files = append(files, CloudFile{
 			FID:      id,
 			CID:      cid,
@@ -491,6 +498,7 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 			Pickcode: firstString(m, "pc"),
 			IsDir:    isDir,
 			SHA1:     strings.ToLower(firstString(m, "sha", "sha1")),
+			ModTime:  modTime,
 		})
 	}
 	count := int(asInt64(resp["count"]))
@@ -650,6 +658,52 @@ func (c *Client) DeleteVerified(ctx context.Context, loc FileLocator) error {
 		c.InvalidateDirCache(loc.CID)
 	}
 	return err
+}
+
+// BatchMove moves up to 50 FIDs per HTTP request into targetCID, drastically reducing 115 API calls.
+func (c *Client) BatchMove(ctx context.Context, sourceCID string, fids []string, targetCID string) error {
+	if len(fids) == 0 {
+		return nil
+	}
+	const chunkSize = 50
+	for i := 0; i < len(fids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(fids) {
+			end = len(fids)
+		}
+		form := url.Values{"pid": {targetCID}}
+		for j, fid := range fids[i:end] {
+			form.Set(fmt.Sprintf("fid[%d]", j), fid)
+		}
+		if _, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/move", form, true); err != nil {
+			return err
+		}
+	}
+	c.InvalidateDirCache(sourceCID, targetCID)
+	return nil
+}
+
+// BatchDelete moves up to 50 FIDs per HTTP request into the 115 recycle bin (/rb/delete).
+func (c *Client) BatchDelete(ctx context.Context, sourceCID string, fids []string) error {
+	if len(fids) == 0 {
+		return nil
+	}
+	const chunkSize = 50
+	for i := 0; i < len(fids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(fids) {
+			end = len(fids)
+		}
+		form := url.Values{"ignore_warn": {"1"}}
+		for j, fid := range fids[i:end] {
+			form.Set(fmt.Sprintf("fid[%d]", j), fid)
+		}
+		if _, err := c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/rb/delete", form, true); err != nil {
+			return err
+		}
+	}
+	c.InvalidateDirCache(sourceCID)
+	return nil
 }
 
 func (c *Client) offlineSign(ctx context.Context) (uid, sign string, ts int64, err error) {
