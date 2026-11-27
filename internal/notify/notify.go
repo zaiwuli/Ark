@@ -97,18 +97,31 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 	}
 
 	icon := eventIcon(msg.Kind, msg.IsError)
-	ts := time.Unix(msg.Timestamp, 0).Format("01-02 15:04:05")
+	ts := time.Unix(msg.Timestamp, 0).Format("15:04")
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⛵ <b>方舟 · %s %s</b>\n", icon, html.EscapeString(msg.Title)))
-	sb.WriteString("━━━━━━━━━━━━━━━\n")
-	if name := strings.TrimSpace(msg.PipelineName); name != "" && !strings.Contains(msg.Body, name) {
-		sb.WriteString("📄 <code>" + html.EscapeString(shortenRunes(name, 60)) + "</code>\n")
+	name := strings.TrimSpace(msg.PipelineName)
+	body := strings.TrimSpace(msg.Body)
+	if name != "" {
+		// Avoid repeating the exact same filename in both line 1 and line 2.
+		for _, prefix := range []string{"115 云解压完成：", "本地解压完成：", "发现云端压缩包，准备云解压：", "本地监控发现稳定压缩包：", "开始本地解压："} {
+			if strings.HasPrefix(body, prefix+name) {
+				rest := strings.TrimSpace(strings.TrimPrefix(body, prefix+name))
+				rest = strings.Trim(rest, "（）() ")
+				if rest != "" {
+					body = rest
+				} else {
+					body = strings.TrimSuffix(prefix, "：")
+				}
+				break
+			}
+		}
 	}
-	sb.WriteString("💬 " + html.EscapeString(msg.Body) + "\n\n")
-	sb.WriteString(fmt.Sprintf("🏷 阶段：<code>%s</code>  ·  🕒 <code>%s</code>",
-		html.EscapeString(zhStage(msg.Stage)), ts))
-	text := sb.String()
+
+	line1 := fmt.Sprintf("%s <b>%s</b>", icon, html.EscapeString(msg.Title))
+	if name != "" {
+		line1 += " · " + html.EscapeString(shortenRunes(name, 48))
+	}
+	text := fmt.Sprintf("%s\n%s · <code>%s</code>", line1, html.EscapeString(body), ts)
 
 	bodyObj := map[string]any{
 		"chat_id":                  cfg.ChatID,
@@ -121,12 +134,12 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 			bodyObj["reply_markup"] = InlineKeyboardMarkup{
 				InlineKeyboard: [][]InlineButton{
 					{
-						{Text: "🗜️ 转本地 7-Zip 解压", CallbackData: "loc:" + msg.PipelineID},
-						{Text: "🔁 重试云解压", CallbackData: "rty:" + msg.PipelineID},
+						{Text: "转本地 7-Zip", CallbackData: "loc:" + msg.PipelineID},
+						{Text: "重试云解压", CallbackData: "rty:" + msg.PipelineID},
 					},
 					{
-						{Text: "⏸️ 暂停任务", CallbackData: "can:" + msg.PipelineID},
-						{Text: "🏠 打开主菜单", CallbackData: "menu"},
+						{Text: "暂停任务", CallbackData: "can:" + msg.PipelineID},
+						{Text: "主菜单", CallbackData: "menu"},
 					},
 				},
 			}
@@ -134,8 +147,8 @@ func SendTelegram(ctx context.Context, cfg TelegramConfig, msg Message) error {
 			bodyObj["reply_markup"] = InlineKeyboardMarkup{
 				InlineKeyboard: [][]InlineButton{
 					{
-						{Text: "🔁 立即重试", CallbackData: "rty:" + msg.PipelineID},
-						{Text: "📋 查看失败列表", CallbackData: "tasks:failed"},
+						{Text: "立即重试", CallbackData: "rty:" + msg.PipelineID},
+						{Text: "失败列表", CallbackData: "tasks:failed"},
 					},
 				},
 			}
@@ -335,42 +348,10 @@ func toMessage(ev store.TaskEvent) Message {
 
 func eventIcon(kind string, isErr bool) string {
 	switch kind {
-	case "SUCCEEDED":
-		return "🎉"
-	case "OFFLINE_SUCCEEDED":
+	case "SUCCEEDED", "OFFLINE_SUCCEEDED", "NO_ARCHIVE_FOUND", "SEED_CLEANUP_COMPLETED", "DATE_ORGANIZED":
 		return "✅"
-	case "NO_ARCHIVE_FOUND":
-		return "📂"
-	case "SEED_CLEANUP_COMPLETED":
-		return "🧹"
-	case "DATE_ORGANIZED":
-		return "🗂️"
-	case "WAITING_APPROVAL", "ARCHIVE_MOVE_WARN":
+	case "WAITING_APPROVAL", "SUBMISSION_UNKNOWN", "ARCHIVE_MOVE_WARN":
 		return "⚠️"
-	case "SUBMISSION_UNKNOWN":
-		return "🔍"
-	case "BARK_WINDOW_FIRED":
-		return "📡"
-	case "BARK_TARGET_CHECKED":
-		return "🔎"
-	case "BARK_PATH_FAILED":
-		return "🚨"
-	case "CLOUD_SOURCE_SCANNED":
-		return "☁️"
-	case "DISCOVERED":
-		return "📦"
-	case "SUBMITTED":
-		return "🚀"
-	case "ARCHIVE_HANDOFF":
-		return "📤"
-	case "CLOUD_EXPORT_STARTED":
-		return "⚡"
-	case "CLOUD_EXTRACT_RETRIED":
-		return "🔁"
-	case "AUTO_LOCAL_FALLBACK", "LOCAL_FALLBACK_APPROVED":
-		return "📥"
-	case "LOCAL_EXTRACT_STARTED":
-		return "🗜️"
 	case "TEST":
 		return "🔔"
 	default:
