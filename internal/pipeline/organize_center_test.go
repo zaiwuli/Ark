@@ -361,6 +361,11 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 || snap.Plan.Counts["junk"] != 2 {
 		t.Fatalf("unexpected cloud BFS+Recursive plan: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
 	}
+	// Smart leaf pruning: d_deep has 2 files including 150MB video -> must NOT be probed!
+	// Expected Files() calls: bfs_root + d_empty + d_wrap + d_ad_dir + d_big_dir = 5 (NOT 6!).
+	if mock.FilesCallCount != 5 {
+		t.Fatalf("expected smart pruning to skip d_deep (5 Files calls total), got %d", mock.FilesCallCount)
+	}
 }
 
 func TestSnapshotZeroAPIRecomputePostExecSyncAndSHA1Manager(t *testing.T) {

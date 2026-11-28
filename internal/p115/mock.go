@@ -23,6 +23,7 @@ type MockClient struct {
 	PrepareCallCount int
 	ExtractStatuses  []string // optional sequence for testing cloud extract progress / failure
 	ExtractCallCount int
+	FilesCallCount   int
 }
 
 func NewMockClient() *MockClient {
@@ -37,6 +38,7 @@ func NewMockClient() *MockClient {
 func (m *MockClient) Files(_ context.Context, cid string, offset int) (FilePage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.FilesCallCount++
 	if offset > 0 {
 		return FilePage{}, nil
 	}

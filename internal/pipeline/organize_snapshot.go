@@ -180,6 +180,9 @@ func (s *Service) captureCloudTargetSnapshot(
 	}
 
 	// Phase 0: Fast flat recursive file fetch (show_dir=0, cur=0, limit=1150)
+	recFilesByParent := make(map[string][]SnapshotChildFile)
+	recMaxSizeByParent := make(map[string]int64)
+	recComplete := false
 	if t.Depth >= 2 && t.CID != "" && t.CID != "0" && t.CID != p115Cfg.CloudRootCID {
 		const maxRecPages = 15
 		offset := 0
@@ -204,9 +207,18 @@ func (s *Service) captureCloudTargetSnapshot(
 					d = 0
 				}
 				addFile(f, f.CID, d)
+				recFilesByParent[f.CID] = append(recFilesByParent[f.CID], SnapshotChildFile{
+					FID:  f.FID,
+					Name: f.Name,
+					Size: f.Size,
+				})
+				if f.Size > recMaxSizeByParent[f.CID] {
+					recMaxSizeByParent[f.CID] = f.Size
+				}
 			}
 			s.center.setProgress(pageIdx+1, maxRecPages, fmt.Sprintf("拉取快照 [115] %s（已收集 %d 个文件）…", t.Name, len(ts.Files)))
 			if page.NextOffset == nil {
+				recComplete = true
 				break
 			}
 			offset = *page.NextOffset
@@ -216,7 +228,7 @@ func (s *Service) captureCloudTargetSnapshot(
 		}
 	}
 
-	// Phase 1: BFS directory tree capture
+	// Phase 1: BFS directory tree capture (with smart pruning of normal multi-file video folders!)
 	type dirNode struct {
 		cid       string
 		parentCID string
@@ -227,7 +239,9 @@ func (s *Service) captureCloudTargetSnapshot(
 	queue := []dirNode{{cid: t.CID, depth: 0}}
 	visited := make(map[string]bool)
 	const maxCloudDirCalls = 200
+	const pruneMinBigFileBytes = 20 * 1024 * 1024
 	apiCalls := 0
+	prunedDirs := 0
 	budgetWarned := false
 
 	reportProgress := func() {
@@ -311,6 +325,22 @@ func (s *Service) captureCloudTargetSnapshot(
 					continue
 				}
 				if probeLeafDirs {
+					// Smart lossless pruning: if Phase 0 already proved this leaf folder has >=2 direct files AND a >=20MB file,
+					// it can NEVER be empty_dir, NEVER be single-child flatten, and NEVER be a <20MB junk folder!
+					if recComplete {
+						if pf := recFilesByParent[f.FID]; len(pf) >= 2 && recMaxSizeByParent[f.FID] >= pruneMinBigFileBytes {
+							prunedDirs++
+							upsertDir(SnapshotDir{
+								FID:        f.FID,
+								ParentCID:  cur.cid,
+								Name:       f.Name,
+								Depth:      cur.depth,
+								IsComplete: false,
+								Files:      pf,
+							})
+							continue
+						}
+					}
 					if apiCalls >= maxCloudDirCalls {
 						if !budgetWarned {
 							budgetWarned = true
@@ -349,6 +379,9 @@ func (s *Service) captureCloudTargetSnapshot(
 			}
 			addFile(f, cur.cid, cur.depth)
 		}
+	}
+	if prunedDirs > 0 {
+		s.center.addLog(fmt.Sprintf("⚡ 智能剪枝跳过 %d 个含大文件的正常目录（省去 %d 次 115 请求）", prunedDirs, prunedDirs))
 	}
 	return ts
 }
