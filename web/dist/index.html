@@ -341,28 +341,100 @@
           </div>
 
           <div id="org-center-pane" class="sub-pane active">
-            <div class="panel">
-              <div class="panel-header">
-                <h2 class="panel-title">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                  <span>目录整理</span>
-                </h2>
+            <!-- Unified Top Command Deck (No double-sidebar!) -->
+            <div class="wb-deck">
+              <div class="wb-deck-row">
+                <div class="wb-targets">
+                  <div id="oc-target-checks" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;"></div>
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="openWbDrawer('targets')">+ 目录</button>
+                  <span id="oc-snap-bar" class="wb-snap-badge"></span>
+                </div>
                 <div class="toolbar">
-                  <button type="button" id="oc-preview-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="recomputeCenterPreview(this)">⚡ 刷新预览</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="openWbDrawer('rules')">⚙ 规则与黑名单</button>
+                  <button type="button" id="oc-preview-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="recomputeCenterPreview(this)">⚡ 秒刷预览</button>
                   <button type="button" id="oc-scan-btn" class="btn btn-primary btn-sm" onclick="startCenterScan(this, true)">📥 拉取快照</button>
                   <button type="button" id="oc-cancel-btn" class="btn btn-danger btn-sm" style="display:none;" onclick="cancelCenterJob(this)">停止</button>
                 </div>
               </div>
-              <div class="panel-body">
-                <div id="oc-target-checks" class="toggle-row"></div>
-                <div id="oc-snap-bar" style="display:none;margin-top:10px;padding:7px 11px;border-radius:8px;background:var(--surface-elevated);border:1px solid var(--border);font-size:12px;color:var(--text-secondary);"></div>
+              <div class="wb-deck-row">
+                <div class="wb-tool-strip">
+                  <label class="wb-tool-pill"><input id="oc-tool-junk" type="checkbox" checked onchange="onOcToolChange()" /> 🧹 垃圾 <span id="oc-side-cnt-junk" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-dup" type="checkbox" checked onchange="onOcToolChange()" /> 👯 查重 <span id="oc-side-cnt-duplicate" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-rename" type="checkbox" onchange="onOcToolChange()" /> ✏️ 洗名 <span id="oc-side-cnt-rename" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-flat" type="checkbox" checked onchange="onOcToolChange()" /> 📦 套娃 <span id="oc-side-cnt-flatten" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-empty" type="checkbox" checked onchange="onOcToolChange()" /> 📂 空目录 <span id="oc-side-cnt-empty_dir" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-date" type="checkbox" onchange="onOcToolChange()" /> 📅 日期 <span id="oc-side-cnt-date_archive" class="wb-tool-cnt">0</span></label>
+                  <label class="wb-tool-pill"><input id="oc-tool-cls" type="checkbox" onchange="onOcToolChange()" /> 🗂️ 归类 <span id="oc-side-cnt-classify" class="wb-tool-cnt">0</span></label>
+                </div>
+              </div>
+            </div>
 
-                <details class="details-box" style="margin-top:12px;">
-                  <summary>+ 自定义整理目录（115 CID / 本地路径）</summary>
-                  <div class="form-grid" style="margin-top:10px;">
+            <!-- Full-Width Preview & Execution Canvas -->
+            <div class="wb-stage">
+              <div class="wb-stage-bar">
+                <div class="sub-tabs" id="oc-tool-tabs" style="margin:0;">
+                  <button type="button" class="sub-tab active" data-tool="all" onclick="switchCenterToolTab('all', this)">全部 (<span id="oc-cnt-all">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="junk" onclick="switchCenterToolTab('junk', this)">垃圾 (<span id="oc-cnt-junk">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="duplicate" onclick="switchCenterToolTab('duplicate', this)">查重 (<span id="oc-cnt-duplicate">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="rename" onclick="switchCenterToolTab('rename', this)">洗名 (<span id="oc-cnt-rename">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="flatten" onclick="switchCenterToolTab('flatten', this)">解包 (<span id="oc-cnt-flatten">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="empty_dir" onclick="switchCenterToolTab('empty_dir', this)">空目录 (<span id="oc-cnt-empty_dir">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="date_archive" onclick="switchCenterToolTab('date_archive', this)">日期 (<span id="oc-cnt-date_archive">0</span>)</button>
+                  <button type="button" class="sub-tab" data-tool="classify" onclick="switchCenterToolTab('classify', this)">归类 (<span id="oc-cnt-classify">0</span>)</button>
+                </div>
+                <div class="toolbar">
+                  <input id="oc-preview-search" class="wb-search" type="text" placeholder="搜索文件名 / 命中规则…" oninput="renderCenterPlanTable()" />
+                  <button type="button" id="oc-undo-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="undoCenterRename(this)">↩️ 撤销改名</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(true)">全选</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(false)">清空</button>
+                  <button type="button" id="oc-exec-btn" class="btn btn-primary btn-sm" onclick="startCenterExec(this)">执行 0 项</button>
+                </div>
+              </div>
+
+              <div id="oc-plan-panel" style="flex:1;display:flex;flex-direction:column;">
+                <div id="oc-empty-stage" class="empty">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  <div class="empty-title">选择目录并点击「📥 拉取快照」</div>
+                  <div class="field-help" style="margin-top:4px;">快照缓存 30 分钟；切换上方工具胶囊即可 0 请求秒刷预览，点「⚙ 规则与黑名单」微调规则</div>
+                </div>
+                <div id="oc-table-wrap" class="table-wrap" style="display:none;flex:1;">
+                  <table>
+                    <thead><tr><th style="width:36px;">选</th><th style="width:92px;">类型</th><th style="width:150px;">来源</th><th>对象 / 变更预览</th><th style="width:240px;">命中说明</th></tr></thead>
+                    <tbody id="oc-plan-list"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Slim Collapsible Bottom Progress & Log Bar -->
+            <div id="oc-progress-wrap" class="wb-console-bar">
+              <div class="wb-console-head" onclick="toggleWbConsole()">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">
+                  <span id="oc-status-badge" class="badge badge-info">运行中</span>
+                  <strong id="oc-stage-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">准备中…</strong>
+                  <div class="progress-track" style="width:140px;flex-shrink:0;">
+                    <div id="oc-progress-fill" class="progress-fill" style="width:0%"></div>
+                  </div>
+                </div>
+                <span id="oc-log-toggle-lbl" class="field-help">展开日志 ▾</span>
+              </div>
+              <pre id="oc-logs" class="wb-log-pre" style="display:none;"></pre>
+            </div>
+
+            <!-- Slide-Over Right Drawer for Rules / SHA1 Blacklist / Custom Targets -->
+            <div id="wb-drawer-mask" class="drawer-mask" onclick="closeWbDrawer()"></div>
+            <aside id="wb-drawer" class="detail-drawer" aria-label="工作台规则与目录">
+              <div class="drawer-head">
+                <h3 id="wb-drawer-title">整理规则与黑名单</h3>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="closeWbDrawer()">✕</button>
+              </div>
+              <div class="drawer-body">
+                <!-- Pane A: Custom Targets -->
+                <div id="wb-pane-targets" style="display:none;flex-direction:column;gap:12px;">
+                  <div class="form-grid">
                     <div class="field">
-                      <label for="ot-name">名称</label>
-                      <input id="ot-name" type="text" placeholder="如：影视收藏" />
+                      <label for="ot-name">目录名称</label>
+                      <input id="ot-name" type="text" placeholder="如：转贴交流" />
                     </div>
                     <div class="field">
                       <label for="ot-kind">类型</label>
@@ -371,158 +443,119 @@
                         <option value="local">本地目录</option>
                       </select>
                     </div>
-                    <div class="field">
-                      <label for="ot-target">CID 或路径</label>
+                    <div class="field span-2">
+                      <label for="ot-target">CID 或本地路径</label>
                       <input id="ot-target" type="text" placeholder="数字 CID 或 /data/..." />
                     </div>
-                    <div class="field">
-                      <label for="ot-depth">深度</label>
+                    <div class="field span-2">
+                      <label for="ot-depth">扫描深度</label>
                       <select id="ot-depth">
-                        <option value="1">1 层</option>
-                        <option value="2">2 层</option>
+                        <option value="1">1 层（仅当前目录）</option>
+                        <option value="2" selected>2 层（文件全层递归 + 2 层目录）</option>
                         <option value="3">3 层</option>
                         <option value="4">4 层</option>
                         <option value="5">5 层</option>
                       </select>
                     </div>
                   </div>
-                  <div class="toolbar" style="margin-top:10px;">
+                  <div class="toolbar">
                     <button type="button" id="ot-save-btn" class="btn btn-primary btn-sm" onclick="addOrganizeTarget(this)">保存目标</button>
                     <button type="button" id="ot-cancel-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="cancelEditOrganizeTarget()">取消编辑</button>
                   </div>
-                  <div id="oc-custom-list" style="margin-top:10px;"></div>
-                </details>
-
-                <div class="toggle-row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
-                  <label class="check-label"><input id="oc-tool-date" type="checkbox" checked onchange="onOcToolChange()" /> 📅 日期归档</label>
-                  <label class="check-label"><input id="oc-tool-rename" type="checkbox" onchange="onOcToolChange()" /> ✏️ 批量洗名</label>
-                  <label class="check-label"><input id="oc-tool-dup" type="checkbox" checked onchange="onOcToolChange()" /> 👯 SHA1查重</label>
-                  <label class="check-label"><input id="oc-tool-junk" type="checkbox" onchange="onOcToolChange()" /> 🧹 垃圾清理</label>
-                  <label class="check-label"><input id="oc-tool-cls" type="checkbox" onchange="onOcToolChange()" /> 🗂️ 文件归类</label>
-                  <label class="check-label"><input id="oc-tool-flat" type="checkbox" onchange="onOcToolChange()" /> 📦 套娃解包</label>
-                  <label class="check-label"><input id="oc-tool-empty" type="checkbox" onchange="onOcToolChange()" /> 📂 空目录</label>
+                  <div id="oc-custom-list"></div>
                 </div>
 
-                <div id="oc-extra-opts" style="display:none;margin-top:12px;padding:12px;border-radius:10px;background:var(--surface-elevated);border:1px solid var(--border);">
-                  <div class="form-grid">
-                    <div class="field" id="oc-ren-ads-wrap" style="display:none;justify-content:flex-end;">
-                      <label class="check-label"><input id="oc-ren-ads" type="checkbox" checked /> 自动去除广告域名/水印前缀</label>
-                    </div>
-                    <div class="field" id="oc-ren-pref-wrap" style="display:none;">
-                      <label for="oc-ren-prefix">统一前缀（可选）</label>
-                      <input id="oc-ren-prefix" type="text" placeholder="留空不加" />
-                    </div>
-                    <div class="field" id="oc-ren-find-wrap" style="display:none;">
-                      <label for="oc-ren-find">查找文本 / 正则</label>
-                      <input id="oc-ren-find" type="text" placeholder="留空不替换" />
-                    </div>
-                    <div class="field" id="oc-ren-rep-wrap" style="display:none;">
-                      <label for="oc-ren-replace">替换为</label>
-                      <div style="display:flex;gap:8px;align-items:center;">
-                        <input id="oc-ren-replace" type="text" placeholder="留空表示删除" style="flex:1;" />
-                        <label class="check-label" style="white-space:nowrap;"><input id="oc-ren-regex" type="checkbox" /> 正则</label>
-                      </div>
-                    </div>
-
-                    <div class="field" id="oc-dup-policy-wrap" style="display:none;">
-                      <label for="oc-dup-policy">查重保留策略</label>
-                      <select id="oc-dup-policy">
-                        <option value="cleanest">保留最干净/最短文件名</option>
-                        <option value="newest">保留最新修改</option>
-                        <option value="oldest">保留最早修改</option>
-                      </select>
-                    </div>
-
-                    <div class="field" id="oc-junk-exts-wrap" style="display:none;">
-                      <label for="oc-junk-exts">垃圾扩展名</label>
+                <!-- Pane B: Rules & SHA1 Blacklist -->
+                <div id="wb-pane-rules" style="display:flex;flex-direction:column;gap:14px;">
+                  <div class="wb-drawer-sec">
+                    <div class="wb-drawer-sec-title">🧹 垃圾清理规则</div>
+                    <div class="field">
+                      <label for="oc-junk-exts">垃圾扩展名（逗号分隔）</label>
                       <input id="oc-junk-exts" type="text" value=".txt,.url,.html,.htm,.apk,.nfo,.lnk" />
                     </div>
-                    <div class="field" id="oc-junk-kws-wrap" style="display:none;">
+                    <div class="field">
                       <label for="oc-junk-kws">垃圾关键词（逗号分隔）</label>
                       <input id="oc-junk-kws" type="text" placeholder="广告,宣传,推广,公众号,进群..." />
                     </div>
-                    <div class="field" id="oc-junk-kwmb-wrap" style="display:none;">
-                      <label for="oc-junk-kwmb">关键词体积保护上限(MB)</label>
-                      <input id="oc-junk-kwmb" type="number" min="0" step="1" value="20" />
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="oc-junk-kwmb">关键词保护上限(MB)</label>
+                        <input id="oc-junk-kwmb" type="number" min="0" step="1" value="20" />
+                      </div>
+                      <div class="field">
+                        <label for="oc-junk-mb">小文件阈值(MB，0不限)</label>
+                        <input id="oc-junk-mb" type="number" min="0" step="0.5" value="0" />
+                      </div>
                     </div>
-                    <div class="field" id="oc-junk-mb-wrap" style="display:none;">
-                      <label for="oc-junk-mb">全局小文件阈值(MB，0不限)</label>
-                      <input id="oc-junk-mb" type="number" min="0" step="0.5" value="0" />
-                    </div>
-                    <div class="field" id="oc-junk-safe-wrap" style="display:none;">
+                    <div class="field">
                       <label for="oc-junk-safe">安全白名单扩展名</label>
                       <input id="oc-junk-safe" type="text" value=".srt,.ass,.ssa,.vtt,.sub,.zip,.rar,.7z" />
                     </div>
+                  </div>
 
-                    <div class="field" id="oc-cls-mode-wrap" style="display:none;">
-                      <label for="oc-cls-mode">归类方式</label>
-                      <select id="oc-cls-mode">
-                        <option value="type">按文件类型</option>
-                        <option value="month">按修改月份</option>
-                      </select>
+                  <div class="wb-drawer-sec">
+                    <div class="wb-drawer-sec-title">✏️ 批量洗名规则</div>
+                    <label class="check-label"><input id="oc-ren-ads" type="checkbox" checked /> 自动去除广告域名 / 水印前缀</label>
+                    <label class="check-label"><input id="oc-ren-smart" type="checkbox" checked /> 目录↔视频智能联动改名（保留序号）</label>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="oc-ren-find">查找文本 / 正则</label>
+                        <input id="oc-ren-find" type="text" placeholder="留空不替换" />
+                      </div>
+                      <div class="field">
+                        <label for="oc-ren-replace">替换为</label>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                          <input id="oc-ren-replace" type="text" placeholder="留空删除" style="flex:1;" />
+                          <label class="check-label" style="white-space:nowrap;"><input id="oc-ren-regex" type="checkbox" /> 正则</label>
+                        </div>
+                      </div>
+                      <div class="field span-2">
+                        <label for="oc-ren-prefix">统一前缀（可选）</label>
+                        <input id="oc-ren-prefix" type="text" placeholder="留空不加" />
+                      </div>
                     </div>
                   </div>
-                  <div class="toolbar" style="margin-top:10px;justify-content:space-between;">
-                    <button type="button" id="oc-sha1-bl-btn" class="btn btn-ghost btn-sm" onclick="toggleSHA1Drawer()">🚫 SHA1黑名单 (0)</button>
-                    <div class="toolbar">
-                      <button type="button" class="btn btn-secondary btn-sm" onclick="saveWorkbenchRules(this)">保存规则</button>
+
+                  <div class="wb-drawer-sec">
+                    <div class="wb-drawer-sec-title">👯 查重与归类</div>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="oc-dup-policy">查重保留策略</label>
+                        <select id="oc-dup-policy">
+                          <option value="cleanest">保留最干净/最短文件名</option>
+                          <option value="newest">保留最新修改</option>
+                          <option value="oldest">保留最早修改</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="oc-cls-mode">归类方式</label>
+                        <select id="oc-cls-mode">
+                          <option value="type">按文件类型</option>
+                          <option value="month">按修改月份</option>
+                        </select>
+                      </div>
                     </div>
                   </div>
-                  <div id="oc-sha1-drawer" style="display:none;margin-top:10px;padding:10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);">
-                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;">
-                      <input id="oc-sha1-search" type="text" placeholder="搜索 SHA1 或文件名…" oninput="renderSHA1Blacklist()" style="flex:1;min-width:140px;" />
-                      <input id="oc-sha1-add-input" type="text" placeholder="手动输入 SHA1…" style="flex:1;min-width:140px;" />
-                      <button type="button" class="btn btn-secondary btn-sm" onclick="addManualSHA1(this)">添加</button>
+
+                  <div class="wb-drawer-sec">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                      <span class="wb-drawer-sec-title" id="oc-sha1-bl-btn">🚫 广告 SHA1 黑名单 (0)</span>
                       <button type="button" class="btn btn-danger btn-sm" onclick="clearBlacklistedSHA1(this)">清空</button>
                     </div>
-                    <div id="oc-sha1-list" style="max-height:210px;overflow:auto;font-size:12px;"></div>
+                    <input id="oc-sha1-search" type="text" placeholder="搜索 SHA1 或文件名…" oninput="renderSHA1Blacklist()" />
+                    <div style="display:flex;gap:6px;">
+                      <input id="oc-sha1-add-input" type="text" placeholder="手动输入 SHA1…" style="flex:1;" />
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="addManualSHA1(this)">添加</button>
+                    </div>
+                    <div id="oc-sha1-list" style="max-height:200px;overflow:auto;font-size:11.5px;"></div>
                   </div>
-                </div>
 
-                <!-- Live Progress & Logs -->
-                <div id="oc-progress-wrap" style="display:none;margin-top:14px;padding:10px 12px;border-radius:10px;background:var(--surface-elevated);border:1px solid var(--border);">
-                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
-                    <strong id="oc-stage-label" style="font-size:13px;">准备中…</strong>
-                    <span id="oc-status-badge" class="badge badge-info">运行中</span>
+                  <div class="toolbar" style="justify-content:flex-end;">
+                    <button type="button" class="btn btn-primary" onclick="saveWorkbenchAndRecompute(this)">保存规则并秒刷预览</button>
                   </div>
-                  <div class="progress-track" style="height:6px;margin-bottom:8px;">
-                    <div id="oc-progress-fill" class="progress-fill" style="width:0%"></div>
-                  </div>
-                  <pre id="oc-logs" style="margin:0;max-height:140px;overflow:auto;font-size:11.5px;line-height:1.5;font-family:var(--font-mono);color:var(--text-secondary);white-space:pre-wrap;"></pre>
                 </div>
               </div>
-            </div>
-
-            <!-- Scan Plan & Checkable Execution -->
-            <div id="oc-plan-panel" class="panel" style="display:none;margin-top:12px;">
-              <div class="panel-header">
-                <h2 class="panel-title"><span>预览清单</span></h2>
-                <div class="toolbar">
-                  <button type="button" id="oc-undo-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="undoCenterRename(this)">↩️ 撤销改名</button>
-                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(true)">全选</button>
-                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCenterAll(false)">清空</button>
-                  <button type="button" id="oc-exec-btn" class="btn btn-warn btn-sm" onclick="startCenterExec(this)">执行 0 项</button>
-                </div>
-              </div>
-              <div class="panel-body">
-                <div class="sub-tabs" id="oc-tool-tabs" style="margin-bottom:10px;">
-                  <button type="button" class="sub-tab active" data-tool="all" onclick="switchCenterToolTab('all', this)">全部 (<span id="oc-cnt-all">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="date_archive" onclick="switchCenterToolTab('date_archive', this)">日期 (<span id="oc-cnt-date_archive">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="rename" onclick="switchCenterToolTab('rename', this)">洗名 (<span id="oc-cnt-rename">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="duplicate" onclick="switchCenterToolTab('duplicate', this)">查重 (<span id="oc-cnt-duplicate">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="junk" onclick="switchCenterToolTab('junk', this)">垃圾 (<span id="oc-cnt-junk">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="classify" onclick="switchCenterToolTab('classify', this)">归类 (<span id="oc-cnt-classify">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="flatten" onclick="switchCenterToolTab('flatten', this)">解包 (<span id="oc-cnt-flatten">0</span>)</button>
-                  <button type="button" class="sub-tab" data-tool="empty_dir" onclick="switchCenterToolTab('empty_dir', this)">空目录 (<span id="oc-cnt-empty_dir">0</span>)</button>
-                </div>
-                <div class="table-wrap">
-                  <table>
-                    <thead><tr><th style="width:32px;">选</th><th>类型</th><th>目录</th><th>对象</th><th>说明</th><th>去向</th></tr></thead>
-                    <tbody id="oc-plan-list"></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
+            </aside>
           </div>
 
           <div id="org-auto-pane" class="sub-pane">

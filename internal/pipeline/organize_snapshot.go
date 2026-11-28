@@ -838,25 +838,119 @@ func (s *Service) evaluateSnapshot(
 			}
 		}
 
-		// 5. Rename & Classify on non-junk, non-duplicate files
+		// 5. Rename (smart Folder<->Video bidirectional + ad cleanup) & Classify on non-junk, non-duplicate items
+		dirByKey := make(map[string]SnapshotDir, len(ts.Dirs))
+		for _, d := range ts.Dirs {
+			dk := d.Path
+			if isCloud {
+				dk = d.FID
+			}
+			if dk != "" {
+				dirByKey[dk] = d
+			}
+		}
+		videosByParent := make(map[string][]SnapshotFile)
+		usedNamesByParent := make(map[string]map[string]bool)
+		for _, fi := range eligibleIdx {
+			if junkIdx[fi] || dupIdx[fi] {
+				continue
+			}
+			f := ts.Files[fi]
+			pkey := f.ParentDir
+			if isCloud {
+				pkey = f.ParentCID
+			}
+			if usedNamesByParent[pkey] == nil {
+				usedNamesByParent[pkey] = make(map[string]bool)
+			}
+			usedNamesByParent[pkey][strings.ToLower(f.Name)] = true
+			if isVideoFileName(f.Name) {
+				videosByParent[pkey] = append(videosByParent[pkey], f)
+			}
+		}
+		allocUniqueName := func(pkey, stem, ext string) string {
+			used := usedNamesByParent[pkey]
+			if used == nil {
+				used = make(map[string]bool)
+				usedNamesByParent[pkey] = used
+			}
+			cand := stem + ext
+			if !used[strings.ToLower(cand)] {
+				used[strings.ToLower(cand)] = true
+				return cand
+			}
+			for n := 2; n < 1000; n++ {
+				alt := fmt.Sprintf("%s_%02d%s", stem, n, ext)
+				if !used[strings.ToLower(alt)] {
+					used[strings.ToLower(alt)] = true
+					return alt
+				}
+			}
+			return cand
+		}
+
+		smartLink := wbCfg.SmartLinkEnabled()
+		videoOrderByParent := make(map[string]int)
+
 		for _, fi := range eligibleIdx {
 			if junkIdx[fi] || dupIdx[fi] {
 				continue
 			}
 			f := &ts.Files[fi]
+			pkey := f.ParentDir
+			if isCloud {
+				pkey = f.ParentCID
+			}
 			if req.EnableRename {
-				if nn, reason := cleanFilename(f.Name, wbCfg); nn != f.Name {
+				var newName, reason string
+				if smartLink && isVideoFileName(f.Name) {
+					ext := filepath.Ext(f.Name)
+					stem := strings.TrimSuffix(f.Name, ext)
+					if isSimpleVideoStem(stem) {
+						if pd, ok := dirByKey[pkey]; ok && !strictDateDirRe.MatchString(pd.Name) && !isMeaninglessFolderName(pd.Name) {
+							cleanDir, _ := cleanFolderName(pd.Name, wbCfg)
+							if hasCJK(cleanDir) {
+								videoOrderByParent[pkey]++
+								seq := extractVideoSeq(stem)
+								targetStem := cleanDir
+								if seq != "" {
+									targetStem = cleanDir + "_" + seq
+								} else if len(videosByParent[pkey]) > 1 {
+									targetStem = fmt.Sprintf("%s_%02d", cleanDir, videoOrderByParent[pkey])
+								}
+								cand := allocUniqueName(pkey, targetStem, ext)
+								if cand != f.Name {
+									newName = cand
+									if seq != "" {
+										reason = "视频随目录名（保留序号）"
+									} else {
+										reason = "视频随目录名"
+									}
+								}
+							}
+						}
+					}
+				}
+				if newName == "" {
+					if nn, r := cleanFilename(f.Name, wbCfg); nn != f.Name {
+						ext := filepath.Ext(nn)
+						stem := strings.TrimSuffix(nn, ext)
+						newName = allocUniqueName(pkey, stem, ext)
+						reason = r
+					}
+				}
+				if newName != "" && newName != f.Name {
 					emit(OrganizeItem{
 						ID:         makeID(),
 						Tool:       "rename",
 						Scope:      t.Kind,
 						TargetName: t.Name,
 						Name:       f.Name,
-						NewName:    nn,
+						NewName:    newName,
 						Size:       f.Size,
 						Detail:     reason,
 						Action:     "rename",
-						DestLabel:  "→ " + nn,
+						DestLabel:  "→ " + newName,
 						SourceCID:  f.ParentCID,
 						FID:        f.FID,
 						SourcePath: f.Path,
@@ -883,6 +977,93 @@ func (s *Service) evaluateSnapshot(
 					RootPath:   t.Path,
 					DestSubdir: subDir,
 				})
+			}
+		}
+
+		// 5b. Folder Renames: meaningless outer folder -> largest descriptive video name; or strip ad prefixes from folder names
+		if req.EnableRename {
+			dirUsedByParent := make(map[string]map[string]bool)
+			for _, d := range ts.Dirs {
+				pk := d.ParentDir
+				if isCloud {
+					pk = d.ParentCID
+				}
+				if dirUsedByParent[pk] == nil {
+					dirUsedByParent[pk] = make(map[string]bool)
+				}
+				dirUsedByParent[pk][strings.ToLower(d.Name)] = true
+			}
+			for _, d := range ts.Dirs {
+				dk := d.Path
+				pk := d.ParentDir
+				if isCloud {
+					dk = d.FID
+					pk = d.ParentCID
+				}
+				if dk == "" || deletedParents[dk] || flattenedParents[dk] || skipParents[dk] || strictDateDirRe.MatchString(d.Name) {
+					continue
+				}
+				if isCloud && activeCIDs[d.FID] {
+					continue
+				}
+				var newDirName, reason string
+				if smartLink && isMeaninglessFolderName(d.Name) {
+					// Pick the largest descriptive (CJK) video inside this folder
+					var bestVid SnapshotFile
+					var bestStem string
+					for _, vf := range videosByParent[dk] {
+						ext := filepath.Ext(vf.Name)
+						rawStem := strings.TrimSuffix(vf.Name, ext)
+						cleanStem, _ := cleanNameStem(rawStem, wbCfg)
+						if hasCJK(cleanStem) && vf.Size >= bestVid.Size {
+							bestVid = vf
+							bestStem = cleanStem
+						}
+					}
+					if bestStem != "" && bestStem != d.Name {
+						newDirName = bestStem
+						reason = "目录随视频名"
+					}
+				}
+				if newDirName == "" {
+					if nn, r := cleanFolderName(d.Name, wbCfg); nn != d.Name {
+						newDirName = nn
+						reason = "目录" + r
+					}
+				}
+				if newDirName != "" && newDirName != d.Name {
+					used := dirUsedByParent[pk]
+					if used == nil {
+						used = make(map[string]bool)
+						dirUsedByParent[pk] = used
+					}
+					cand := newDirName
+					if used[strings.ToLower(cand)] {
+						for n := 2; n < 1000; n++ {
+							alt := fmt.Sprintf("%s (%d)", newDirName, n)
+							if !used[strings.ToLower(alt)] {
+								cand = alt
+								break
+							}
+						}
+					}
+					used[strings.ToLower(cand)] = true
+					emit(OrganizeItem{
+						ID:         makeID(),
+						Tool:       "rename",
+						Scope:      t.Kind,
+						TargetName: t.Name,
+						Name:       d.Name,
+						NewName:    cand,
+						Detail:     reason,
+						Action:     "rename",
+						DestLabel:  "📁 → " + cand,
+						SourceCID:  d.ParentCID,
+						FID:        d.FID,
+						SourcePath: d.Path,
+						RootPath:   d.ParentDir,
+					})
+				}
 			}
 		}
 	}
@@ -1033,6 +1214,9 @@ func syncSnapshotAfterExec(snap *OrganizeSnapshot, completed []OrganizeItem) {
 			if isCloud {
 				if delFIDs[d.FID] || movedFIDs[d.FID] || flatWrappers[d.FID].ID != "" {
 					continue
+				}
+				if nn, ok := renFIDs[d.FID]; ok {
+					d.Name = nn
 				}
 				nf := d.Files[:0]
 				for _, cf := range d.Files {

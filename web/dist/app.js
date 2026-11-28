@@ -1207,7 +1207,7 @@ async function loadOrganizeCenter() {
     if (wrap) {
       wrap.innerHTML = allTargets.map((t) => {
         const checked = hasPrev ? prevChecked.has(t.key) : t.def;
-        return `<label class="check-label"><input type="checkbox" class="oc-target-cb" value="${esc(t.key)}" ${checked ? 'checked' : ''} /> ${esc(t.label)}</label>`;
+        return `<label class="wb-target-chip"><input type="checkbox" class="oc-target-cb" value="${esc(t.key)}" ${checked ? 'checked' : ''} /> ${esc(t.label)}</label>`;
       }).join('');
     }
 
@@ -1234,15 +1234,56 @@ async function loadOrganizeCenter() {
     }
 
     if (st) renderCenterState(st);
+    toggleOcRuleFields();
   } catch {}
 }
 
 let ocCustomTargets = [];
 let editingOrganizeTargetId = '';
 
+function openWbDrawer(mode) {
+  const mask = document.getElementById('wb-drawer-mask');
+  const drw = document.getElementById('wb-drawer');
+  const title = document.getElementById('wb-drawer-title');
+  const pTgt = document.getElementById('wb-pane-targets');
+  const pRule = document.getElementById('wb-pane-rules');
+  if (!drw) return;
+  const isTargets = mode === 'targets';
+  if (title) title.textContent = isTargets ? '自定义整理目录' : '整理规则与黑名单';
+  if (pTgt) pTgt.style.display = isTargets ? 'flex' : 'none';
+  if (pRule) pRule.style.display = isTargets ? 'none' : 'flex';
+  if (!isTargets) renderSHA1Blacklist();
+  mask?.classList.add('open');
+  drw.classList.add('open');
+}
+
+function closeWbDrawer() {
+  document.getElementById('wb-drawer-mask')?.classList.remove('open');
+  document.getElementById('wb-drawer')?.classList.remove('open');
+}
+
+function toggleWbConsole() {
+  const pre = document.getElementById('oc-logs');
+  const lbl = document.getElementById('oc-log-toggle-lbl');
+  if (!pre) return;
+  const open = pre.style.display === 'none';
+  pre.style.display = open ? 'block' : 'none';
+  if (lbl) lbl.textContent = open ? '收起日志 ▴' : '展开日志 ▾';
+}
+
+async function saveWorkbenchAndRecompute(btn) {
+  await saveWorkbenchRules(btn);
+  const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
+  if (hasMatchingSnapshot(target_keys) && ocState.lastStatus !== 'running') {
+    await recomputeCenterPreview(null, true);
+  }
+  closeWbDrawer();
+}
+
 function editOrganizeTarget(id) {
   const c = ocCustomTargets.find((x) => x.id === id);
   if (!c) return;
+  openWbDrawer('targets');
   editingOrganizeTargetId = c.id;
   document.getElementById('ot-name').value = c.name || '';
   document.getElementById('ot-kind').value = c.kind || 'cloud';
@@ -1317,6 +1358,7 @@ function applyWorkbenchToUI(wb) {
   setVal('oc-junk-safe', wb.junk_safe_exts);
   setVal('oc-dup-policy', wb.dedup_keep_policy || 'cleanest');
   setChk('oc-ren-ads', wb.rename_clean_ads !== false);
+  setChk('oc-ren-smart', wb.rename_smart_link !== false);
   setVal('oc-ren-find', wb.rename_find);
   setVal('oc-ren-replace', wb.rename_replace);
   setChk('oc-ren-regex', wb.rename_regex);
@@ -1417,6 +1459,7 @@ function collectWorkbenchPayload() {
     junk_sha1_names: ocWorkbenchCfg?.junk_sha1_names || {},
     dedup_keep_policy: document.getElementById('oc-dup-policy')?.value || 'cleanest',
     rename_clean_ads: !!document.getElementById('oc-ren-ads')?.checked,
+    rename_smart_link: !!document.getElementById('oc-ren-smart')?.checked,
     rename_find: document.getElementById('oc-ren-find')?.value || '',
     rename_replace: document.getElementById('oc-ren-replace')?.value || '',
     rename_regex: !!document.getElementById('oc-ren-regex')?.checked,
@@ -1620,9 +1663,8 @@ function renderCenterState(st) {
   if (snapBar) {
     if (st.snapshot && st.snapshot.ready) {
       const remMin = Math.max(1, Math.round((st.snapshot.expires_at - Math.floor(Date.now() / 1000)) / 60));
-      const tnames = (st.snapshot.target_names || []).join('、') || '已选目录';
-      snapBar.style.display = 'block';
-      snapBar.innerHTML = `📦 <strong>目录树快照已缓存</strong>：${esc(tnames)} · <strong>${st.snapshot.file_count}</strong> 文件 / <strong>${st.snapshot.dir_count}</strong> 目录（剩余约 ${remMin} 分钟 · 切换勾选工具或改规则后 <strong>0 请求秒刷预览</strong>）`;
+      snapBar.style.display = 'inline-flex';
+      snapBar.innerHTML = `● ${st.snapshot.file_count} 文件 / ${st.snapshot.dir_count} 目录 · ${remMin}分`;
       if (previewBtn) previewBtn.style.display = 'inline-flex';
       if (scanBtn) scanBtn.textContent = '🔄 刷新快照';
     } else {
@@ -1657,7 +1699,6 @@ function renderCenterState(st) {
   if (scanBtn) scanBtn.disabled = active;
   if (active && !ocState.pollTimer) startCenterPolling();
 
-  const planPanel = document.getElementById('oc-plan-panel');
   if (st.plan && Array.isArray(st.plan.items)) {
     ocState.plan = st.plan;
     if (st.plan.generated_at && st.plan.generated_at !== ocState.lastPlanTs) {
@@ -1669,7 +1710,10 @@ function renderCenterState(st) {
         if (!validIds.has(id)) ocState.checkedIds.delete(id);
       }
     }
-    planPanel.style.display = 'block';
+    const emptyEl = document.getElementById('oc-empty-stage');
+    const tblWrap = document.getElementById('oc-table-wrap');
+    if (emptyEl) emptyEl.style.display = 'none';
+    if (tblWrap) tblWrap.style.display = 'block';
     const undoBtn = document.getElementById('oc-undo-btn');
     if (undoBtn) {
       undoBtn.style.display = st.undo_rename_count > 0 ? 'inline-flex' : 'none';
@@ -1678,8 +1722,14 @@ function renderCenterState(st) {
     const counts = st.plan.counts || {};
     document.getElementById('oc-cnt-all').textContent = st.plan.items.length;
     ['date_archive', 'rename', 'duplicate', 'junk', 'classify', 'flatten', 'empty_dir'].forEach((k) => {
+      const n = counts[k] || 0;
       const el = document.getElementById('oc-cnt-' + k);
-      if (el) el.textContent = counts[k] || 0;
+      if (el) el.textContent = n;
+      const side = document.getElementById('oc-side-cnt-' + k);
+      if (side) {
+        side.textContent = n;
+        side.classList.toggle('has-hits', n > 0);
+      }
     });
     renderCenterPlanTable();
   }
@@ -1716,6 +1766,7 @@ function toggleOcRuleFields() {
   if (wrap) wrap.style.display = (showRen || showDup || showJunk || showCls) ? 'block' : 'none';
   const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? 'flex' : 'none'; };
   show('oc-ren-ads-wrap', showRen);
+  show('oc-ren-smart-wrap', showRen);
   show('oc-ren-pref-wrap', showRen);
   show('oc-ren-find-wrap', showRen);
   show('oc-ren-rep-wrap', showRen);
@@ -1725,6 +1776,8 @@ function toggleOcRuleFields() {
   show('oc-junk-kwmb-wrap', showJunk);
   show('oc-junk-mb-wrap', showJunk);
   show('oc-junk-safe-wrap', showJunk);
+  const szRow = document.getElementById('oc-junk-size-row');
+  if (szRow) szRow.style.display = showJunk ? 'grid' : 'none';
   show('oc-cls-mode-wrap', showCls);
 }
 
@@ -1736,23 +1789,33 @@ function updateCenterExecBtn() {
 function renderCenterPlanTable() {
   const tbody = document.getElementById('oc-plan-list');
   if (!tbody || !ocState.plan) return;
-  const items = ocState.plan.items.filter((x) => ocState.toolTab === 'all' || x.tool === ocState.toolTab);
+  const q = (document.getElementById('oc-preview-search')?.value || '').trim().toLowerCase();
+  const items = ocState.plan.items.filter((x) => {
+    if (ocState.toolTab !== 'all' && x.tool !== ocState.toolTab) return false;
+    if (!q) return true;
+    return (x.name || '').toLowerCase().includes(q)
+      || (x.new_name || '').toLowerCase().includes(q)
+      || (x.detail || '').toLowerCase().includes(q)
+      || (x.target_name || '').toLowerCase().includes(q);
+  });
   tbody.innerHTML = items.length ? items.map((it) => {
     const [tlbl, tcls] = OC_TOOL_LABEL[it.tool] || [it.tool, 'badge-muted'];
     const checked = ocState.checkedIds.has(it.id) ? 'checked' : '';
     const blBtn = it.sha1 && (it.tool === 'junk' || it.tool === 'duplicate')
       ? ` <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px;" onclick="blacklistItemSHA1('${esc(it.sha1)}', '${esc(it.name)}', this)">拉黑SHA1</button>`
       : '';
+    const objCell = it.tool === 'rename'
+      ? `<div class="wb-diff-old">${esc(it.name)}${it.size ? ` (${fmtSize(it.size)})` : ''}</div><div class="wb-diff-new">${esc(it.dest_label)}</div>`
+      : `<div><strong>${esc(it.name)}</strong>${it.size ? ` <span class="field-help">(${fmtSize(it.size)})</span>` : ''}</div><div class="field-help" style="margin-top:2px;"><code>${esc(it.dest_label)}</code></div>`;
     return `
       <tr>
         <td><input type="checkbox" ${checked} onchange="toggleCenterItem('${esc(it.id)}', this.checked)" /></td>
         <td><span class="badge ${tcls}">${tlbl}</span></td>
-        <td><span class="badge ${it.scope === 'cloud' ? 'badge-ok' : 'badge-info'}">${it.scope === 'cloud' ? '115' : '本地'}</span> ${esc(it.target_name)}</td>
-        <td><strong>${esc(it.name)}</strong>${it.size ? ` <span class="field-help">(${fmtSize(it.size)})</span>` : ''}</td>
+        <td style="white-space:nowrap;"><span class="badge ${it.scope === 'cloud' ? 'badge-ok' : 'badge-info'}">${it.scope === 'cloud' ? '115' : '本地'}</span> ${esc(it.target_name)}</td>
+        <td>${objCell}</td>
         <td>${esc(it.detail)}${blBtn}</td>
-        <td><code>${esc(it.dest_label)}</code></td>
       </tr>`;
-  }).join('') : '<tr><td colspan="6" class="field-help">当前分类下暂无待整理项</td></tr>';
+  }).join('') : '<tr><td colspan="5" class="field-help">当前筛选条件下暂无待整理项</td></tr>';
   updateCenterExecBtn();
 }
 
@@ -2003,7 +2066,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (f) setSelectedFile(f);
   });
 
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetail(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDetail(); closeWbDrawer(); } });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && state.polling) refreshTelemetry();
   });

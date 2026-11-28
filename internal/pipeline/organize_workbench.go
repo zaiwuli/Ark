@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/zaiwuli/Ark/internal/store"
 )
@@ -23,6 +24,7 @@ type WorkbenchConfig struct {
 	JunkSHA1Names     map[string]string `json:"junk_sha1_names,omitempty"`
 	DedupKeepPolicy   string            `json:"dedup_keep_policy"` // cleanest | newest | oldest
 	RenameCleanAds    bool              `json:"rename_clean_ads"`
+	RenameSmartLink   *bool             `json:"rename_smart_link,omitempty"` // folder<->video smart naming (default true)
 	RenameFind        string            `json:"rename_find"`
 	RenameReplace     string            `json:"rename_replace"`
 	RenameRegex       bool              `json:"rename_regex"`
@@ -30,7 +32,15 @@ type WorkbenchConfig struct {
 	ClassifyMode      string            `json:"classify_mode"` // type | month
 }
 
+func (c WorkbenchConfig) SmartLinkEnabled() bool {
+	if c.RenameSmartLink == nil {
+		return true
+	}
+	return *c.RenameSmartLink
+}
+
 func DefaultWorkbenchConfig() WorkbenchConfig {
+	smartOn := true
 	return WorkbenchConfig{
 		JunkExts:          ".txt,.url,.html,.htm,.apk,.nfo,.lnk",
 		JunkKeywords:      "广告,宣传,推广,公众号,进群,网址,最新地址,备用地址,必看,免费看,thumbs.db,.ds_store",
@@ -40,6 +50,7 @@ func DefaultWorkbenchConfig() WorkbenchConfig {
 		JunkSHA1Blacklist: []string{},
 		DedupKeepPolicy:   "cleanest",
 		RenameCleanAds:    true,
+		RenameSmartLink:   &smartOn,
 		ClassifyMode:      "type",
 	}
 }
@@ -195,19 +206,75 @@ var (
 	adPrefixPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)^\s*(?:https?://)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,6}\s*(?:\[url=[^\]]*\]@\[/url\]|@|\s*-\s*)`),
 		regexp.MustCompile(`(?i)\[url=[^\]]*\][^[]*\[/url\]`),
-		regexp.MustCompile(`【(?:自转|115ED2k|夸克/115eD2k|115|资源|原档|首发|独家|福利|广告|推广|免翻)[^】]{0,20}】`),
+		regexp.MustCompile(`(?i)(?:^\s*\d{2,5}\s*[-_.]\s*)?【[^】]{0,40}\.(?:cc|com|net|la|top|cx|xyz|vip|tv|me)[^】]{0,40}】`),
+		regexp.MustCompile(`(?:^\s*\d{2,5}\s*[-_.]\s*)?【(?:自转|115ED2k|夸克/115eD2k|115|资源|原档|首发|独家|福利|广告|推广|免翻)[^】]{0,20}】`),
 		regexp.MustCompile(`\[(?:自转|115ED2k|115|AD|广告)[^\]]{0,20}\]`),
 	}
 	illegalNameChars = regexp.MustCompile(`[\\/:*?"<>|]+`)
 	multiSpaceRe     = regexp.MustCompile(`\s{2,}`)
+	seqParenRe       = regexp.MustCompile(`[\(（\[]\s*(\d{1,3})\s*[\)）\]]`)
+	seqTailRe        = regexp.MustCompile(`(?i)(?:^|[\s_\-.]|part|ep|cd|disc|vol|v)(\d{1,3})$`)
 )
 
-// cleanFilename computes a cleaned filename according to WorkbenchConfig, preserving file extension.
-func cleanFilename(name string, cfg WorkbenchConfig) (newName string, reason string) {
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	if base == "" {
-		return name, ""
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func isVideoFileName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m4v", ".webm", ".rmvb", ".mpg", ".mpeg":
+		return true
+	}
+	return false
+}
+
+func isMeaninglessFolderName(name string) bool {
+	if strictDateDirRe.MatchString(name) {
+		return false
+	}
+	low := strings.ToLower(strings.TrimSpace(name))
+	switch low {
+	case "新建文件夹", "片", "视频", "正片", "合集", "video", "videos", "movie", "movies", "files", "download", "downloads", "temp", "tmp", "new folder":
+		return true
+	}
+	return !hasCJK(name)
+}
+
+func isSimpleVideoStem(stem string) bool {
+	s := strings.TrimSpace(stem)
+	if s == "" {
+		return false
+	}
+	return !hasCJK(s)
+}
+
+// extractVideoSeq extracts a 1-3 digit episode/sequence number from a simple video stem (e.g. "mp4_ (7)" -> "07", "2" -> "02").
+func extractVideoSeq(stem string) string {
+	s := strings.TrimSpace(stem)
+	if m := seqParenRe.FindStringSubmatch(s); len(m) == 2 {
+		if len(m[1]) == 1 {
+			return "0" + m[1]
+		}
+		return m[1]
+	}
+	if m := seqTailRe.FindStringSubmatch(s); len(m) == 2 {
+		if len(m[1]) == 1 {
+			return "0" + m[1]
+		}
+		return m[1]
+	}
+	return ""
+}
+
+// cleanNameStem cleans a filename stem or folder name without touching file extensions.
+func cleanNameStem(base string, cfg WorkbenchConfig) (string, string) {
+	if strings.TrimSpace(base) == "" {
+		return base, ""
 	}
 	origBase := base
 	var reasons []string
@@ -248,16 +315,37 @@ func cleanFilename(name string, cfg WorkbenchConfig) (newName string, reason str
 	base = strings.TrimSpace(illegalNameChars.ReplaceAllString(base, " "))
 	base = strings.TrimSpace(multiSpaceRe.ReplaceAllString(base, " "))
 	if base == "" {
-		return name, ""
+		return origBase, ""
 	}
-	candidate := base + ext
-	if candidate == name {
-		return name, ""
+	if base == origBase {
+		return origBase, ""
 	}
 	if len(reasons) == 0 {
 		reasons = append(reasons, "规范化")
 	}
-	return candidate, strings.Join(reasons, "+")
+	return base, strings.Join(reasons, "+")
+}
+
+// cleanFilename computes a cleaned filename according to WorkbenchConfig, preserving file extension.
+func cleanFilename(name string, cfg WorkbenchConfig) (newName string, reason string) {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	if base == "" {
+		return name, ""
+	}
+	cleaned, reason := cleanNameStem(base, cfg)
+	if cleaned == base {
+		return name, ""
+	}
+	return cleaned + ext, reason
+}
+
+// cleanFolderName cleans a folder name without treating dots inside domain names as extensions.
+func cleanFolderName(name string, cfg WorkbenchConfig) (string, string) {
+	if strictDateDirRe.MatchString(name) {
+		return name, ""
+	}
+	return cleanNameStem(name, cfg)
 }
 
 func parseKeywords(raw string) []string {

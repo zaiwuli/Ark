@@ -488,3 +488,74 @@ func TestSnapshotZeroAPIRecomputePostExecSyncAndSHA1Manager(t *testing.T) {
 		t.Fatalf("RemoveJunkSHA1 failed: %+v err=%v", wb2.JunkSHA1Blacklist, err)
 	}
 }
+
+func TestSmartBidirectionalFolderVideoRenameWithSequence(t *testing.T) {
+	tmp := t.TempDir()
+	st, err := store.Open(filepath.Join(tmp, "ark.db"), filepath.Join(tmp, "secret.key"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	mock := p115.NewMockClient()
+	mock.Listings["ren_root"] = []p115.CloudFile{
+		// Case 1: Descriptive folder (with ad prefix!) + simple English/numbered videos inside -> videos inherit cleaned folder name + keep sequence!
+		{FID: "d_desc", CID: "ren_root", Name: "0002-【122.CX春药】酒店夜景纪录片", IsDir: true},
+		// Case 2: Meaningless code folder + descriptive Chinese video inside -> folder inherits cleaned video name!
+		{FID: "d_code", CID: "ren_root", Name: "BKNYQL5.22", IsDir: true},
+	}
+	mock.Listings["d_desc"] = []p115.CloudFile{
+		{FID: "v1", CID: "d_desc", Name: "mp4_ (7).mp4", Size: 80 * 1024 * 1024},
+		{FID: "v2", CID: "d_desc", Name: "clip.mp4", Size: 60 * 1024 * 1024},
+	}
+	mock.Listings["d_code"] = []p115.CloudFile{
+		{FID: "v3", CID: "d_code", Name: "www.98t.la@高清城市风光实拍.mp4", Size: 120 * 1024 * 1024},
+		{FID: "v4", CID: "d_code", Name: "花絮.mp4", Size: 10 * 1024 * 1024},
+	}
+
+	svc := NewServiceWithOptions(st, ServiceOptions{Timezone: "Asia/Shanghai", DataDir: tmp, WorkDir: tmp})
+	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "root_cid"})
+	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "洗名测试", Kind: "cloud", Target: "ren_root", Depth: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanAds := true
+	smartLink := true
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:      []string{"custom:" + ct.ID},
+		EnableRename:    true,
+		RenameCleanAds:  &cleanAds,
+		RenameSmartLink: &smartLink,
+		ForceRefresh:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var snap CenterJobState
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Plan == nil {
+		t.Fatalf("scan failed: %+v", snap)
+	}
+	got := make(map[string]string)
+	for _, it := range snap.Plan.Items {
+		got[it.Name] = it.NewName
+	}
+	if got["mp4_ (7).mp4"] != "酒店夜景纪录片_07.mp4" {
+		t.Fatalf("expected seq-preserved video rename '酒店夜景纪录片_07.mp4', got %+v", got)
+	}
+	if got["clip.mp4"] != "酒店夜景纪录片_02.mp4" {
+		t.Fatalf("expected multi-video fallback seq '酒店夜景纪录片_02.mp4', got %+v", got)
+	}
+	if got["0002-【122.CX春药】酒店夜景纪录片"] != "酒店夜景纪录片" {
+		t.Fatalf("expected ad-stripped folder rename '酒店夜景纪录片', got %+v", got)
+	}
+	if got["BKNYQL5.22"] != "高清城市风光实拍" {
+		t.Fatalf("expected meaningless folder rename to largest CJK video '高清城市风光实拍', got %+v", got)
+	}
+}

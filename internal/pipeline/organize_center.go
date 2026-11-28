@@ -48,6 +48,7 @@ type CenterScanRequest struct {
 	DedupKeepPolicy  string   `json:"dedup_keep_policy"`
 	ClassifyMode     string   `json:"classify_mode"`
 	RenameCleanAds   *bool    `json:"rename_clean_ads,omitempty"`
+	RenameSmartLink  *bool    `json:"rename_smart_link,omitempty"`
 	RenameFind       string   `json:"rename_find"`
 	RenameReplace    string   `json:"rename_replace"`
 	RenameRegex      bool     `json:"rename_regex"`
@@ -411,6 +412,10 @@ func (s *Service) mergeWorkbenchReq(ctx context.Context, req CenterScanRequest) 
 	}
 	if req.RenameCleanAds != nil {
 		wbCfg.RenameCleanAds = *req.RenameCleanAds
+	}
+	if req.RenameSmartLink != nil {
+		v := *req.RenameSmartLink
+		wbCfg.RenameSmartLink = &v
 	}
 	if req.RenameFind != "" || req.RenameReplace != "" {
 		wbCfg.RenameFind = req.RenameFind
@@ -1496,6 +1501,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	// delete -> rename -> flatten -> move, propagating renamed paths so rename+classify on the same file both succeed.
 	var localOrdered []OrganizeItem
 	for _, phase := range []string{"delete", "rename", "flatten", "move"} {
+		var bucket []OrganizeItem
 		for _, it := range selected {
 			if it.Scope != "local" {
 				continue
@@ -1505,9 +1511,16 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				act = "move"
 			}
 			if act == phase {
-				localOrdered = append(localOrdered, it)
+				bucket = append(bucket, it)
 			}
 		}
+		if phase == "rename" && len(bucket) > 1 {
+			// Rename child files before parent folders so nested paths stay valid.
+			sort.SliceStable(bucket, func(i, j int) bool {
+				return len(bucket[i].SourcePath) > len(bucket[j].SourcePath)
+			})
+		}
+		localOrdered = append(localOrdered, bucket...)
 	}
 	renamedPathMap := make(map[string]string)
 	for _, it := range localOrdered {
