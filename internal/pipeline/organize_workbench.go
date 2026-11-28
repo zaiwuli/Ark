@@ -14,19 +14,20 @@ import (
 
 // WorkbenchConfig persists the user's preferred Organize Workbench rules across sessions.
 type WorkbenchConfig struct {
-	JunkExts          string   `json:"junk_exts"`
-	JunkKeywords      string   `json:"junk_keywords"`
-	JunkKeywordMaxMB  float64  `json:"junk_keyword_max_mb"`
-	JunkMaxMB         float64  `json:"junk_max_mb"`
-	JunkSafeExts      string   `json:"junk_safe_exts"`
-	JunkSHA1Blacklist []string `json:"junk_sha1_blacklist"`
-	DedupKeepPolicy   string   `json:"dedup_keep_policy"` // cleanest | newest | oldest
-	RenameCleanAds    bool     `json:"rename_clean_ads"`
-	RenameFind        string   `json:"rename_find"`
-	RenameReplace     string   `json:"rename_replace"`
-	RenameRegex       bool     `json:"rename_regex"`
-	RenamePrefix      string   `json:"rename_prefix"`
-	ClassifyMode      string   `json:"classify_mode"` // type | month
+	JunkExts          string            `json:"junk_exts"`
+	JunkKeywords      string            `json:"junk_keywords"`
+	JunkKeywordMaxMB  float64           `json:"junk_keyword_max_mb"`
+	JunkMaxMB         float64           `json:"junk_max_mb"`
+	JunkSafeExts      string            `json:"junk_safe_exts"`
+	JunkSHA1Blacklist []string          `json:"junk_sha1_blacklist"`
+	JunkSHA1Names     map[string]string `json:"junk_sha1_names,omitempty"`
+	DedupKeepPolicy   string            `json:"dedup_keep_policy"` // cleanest | newest | oldest
+	RenameCleanAds    bool              `json:"rename_clean_ads"`
+	RenameFind        string            `json:"rename_find"`
+	RenameReplace     string            `json:"rename_replace"`
+	RenameRegex       bool              `json:"rename_regex"`
+	RenamePrefix      string            `json:"rename_prefix"`
+	ClassifyMode      string            `json:"classify_mode"` // type | month
 }
 
 func DefaultWorkbenchConfig() WorkbenchConfig {
@@ -73,6 +74,15 @@ func (c WorkbenchConfig) Normalize() WorkbenchConfig {
 		}
 	}
 	c.JunkSHA1Blacklist = cleaned
+	if len(c.JunkSHA1Names) > 0 {
+		cleanNames := make(map[string]string, len(cleaned))
+		for _, h := range cleaned {
+			if name := strings.TrimSpace(c.JunkSHA1Names[h]); name != "" {
+				cleanNames[h] = name
+			}
+		}
+		c.JunkSHA1Names = cleanNames
+	}
 	return c
 }
 
@@ -92,20 +102,48 @@ func (s *Service) SaveWorkbenchConfig(ctx context.Context, incoming WorkbenchCon
 
 const emptyFileSHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
 
-func (s *Service) AddJunkSHA1(ctx context.Context, sha1Hex string) (WorkbenchConfig, error) {
+func (s *Service) AddJunkSHA1(ctx context.Context, sha1Hex string, fileName ...string) (WorkbenchConfig, error) {
 	h := strings.ToLower(strings.TrimSpace(sha1Hex))
 	if len(h) < 8 || h == emptyFileSHA1 {
 		return WorkbenchConfig{}, store.ErrInvalid
 	}
 	cfg := s.WorkbenchConfig(ctx)
 	cfg.JunkSHA1Blacklist = append(cfg.JunkSHA1Blacklist, h)
+	if len(fileName) > 0 && strings.TrimSpace(fileName[0]) != "" {
+		if cfg.JunkSHA1Names == nil {
+			cfg.JunkSHA1Names = make(map[string]string)
+		}
+		cfg.JunkSHA1Names[h] = strings.TrimSpace(fileName[0])
+	}
 	return s.SaveWorkbenchConfig(ctx, cfg)
 }
 
-// AddJunkSHA1s batch-persists multiple SHA1 hashes into the junk blacklist,
-// skipping empty-file hashes and duplicates. Returns the count of newly added hashes.
-func (s *Service) AddJunkSHA1s(ctx context.Context, hashes []string) (int, error) {
-	if len(hashes) == 0 {
+func (s *Service) RemoveJunkSHA1(ctx context.Context, sha1Hex string) (WorkbenchConfig, error) {
+	h := strings.ToLower(strings.TrimSpace(sha1Hex))
+	cfg := s.WorkbenchConfig(ctx)
+	filtered := make([]string, 0, len(cfg.JunkSHA1Blacklist))
+	for _, x := range cfg.JunkSHA1Blacklist {
+		if x != h {
+			filtered = append(filtered, x)
+		}
+	}
+	cfg.JunkSHA1Blacklist = filtered
+	if cfg.JunkSHA1Names != nil {
+		delete(cfg.JunkSHA1Names, h)
+	}
+	return s.SaveWorkbenchConfig(ctx, cfg)
+}
+
+func (s *Service) ClearJunkSHA1(ctx context.Context) (WorkbenchConfig, error) {
+	cfg := s.WorkbenchConfig(ctx)
+	cfg.JunkSHA1Blacklist = []string{}
+	cfg.JunkSHA1Names = nil
+	return s.SaveWorkbenchConfig(ctx, cfg)
+}
+
+// AddJunkSHA1WithNames batch-persists SHA1 hashes along with optional display filenames.
+func (s *Service) AddJunkSHA1WithNames(ctx context.Context, entries map[string]string) (int, error) {
+	if len(entries) == 0 {
 		return 0, nil
 	}
 	cfg := s.WorkbenchConfig(ctx)
@@ -113,17 +151,29 @@ func (s *Service) AddJunkSHA1s(ctx context.Context, hashes []string) (int, error
 	for _, h := range cfg.JunkSHA1Blacklist {
 		existing[strings.ToLower(strings.TrimSpace(h))] = true
 	}
+	if cfg.JunkSHA1Names == nil {
+		cfg.JunkSHA1Names = make(map[string]string)
+	}
 	added := 0
-	for _, raw := range hashes {
+	updatedName := false
+	for raw, name := range entries {
 		h := strings.ToLower(strings.TrimSpace(raw))
-		if len(h) < 8 || h == emptyFileSHA1 || existing[h] {
+		if len(h) < 8 || h == emptyFileSHA1 {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name != "" && cfg.JunkSHA1Names[h] == "" {
+			cfg.JunkSHA1Names[h] = name
+			updatedName = true
+		}
+		if existing[h] {
 			continue
 		}
 		existing[h] = true
 		cfg.JunkSHA1Blacklist = append(cfg.JunkSHA1Blacklist, h)
 		added++
 	}
-	if added == 0 {
+	if added == 0 && !updatedName {
 		return 0, nil
 	}
 	if _, err := s.SaveWorkbenchConfig(ctx, cfg); err != nil {

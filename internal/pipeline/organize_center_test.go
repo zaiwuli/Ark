@@ -362,3 +362,108 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 		t.Fatalf("unexpected cloud BFS+Recursive plan: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
 	}
 }
+
+func TestSnapshotZeroAPIRecomputePostExecSyncAndSHA1Manager(t *testing.T) {
+	tmp := t.TempDir()
+	st, err := store.Open(filepath.Join(tmp, "ark.db"), filepath.Join(tmp, "secret.key"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	mock := p115.NewMockClient()
+	mock.Listings["snap_root"] = []p115.CloudFile{
+		{FID: "d_only_junk", CID: "snap_root", Name: "待清空目录", IsDir: true},
+		{FID: "f_dup1", CID: "snap_root", Name: "movie.mp4", Size: 50 * 1024 * 1024, SHA1: "dupsha111"},
+		{FID: "f_dup2", CID: "snap_root", Name: "www.ad.com@movie.mp4", Size: 50 * 1024 * 1024, SHA1: "dupsha111"},
+	}
+	mock.Listings["d_only_junk"] = []p115.CloudFile{
+		{FID: "f_j1", CID: "d_only_junk", Name: "广告.txt", Size: 512, SHA1: "junksha999"},
+	}
+
+	svc := NewServiceWithOptions(st, ServiceOptions{Timezone: "Asia/Shanghai", DataDir: tmp, WorkDir: tmp})
+	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "root_cid"})
+	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "快照测试", Kind: "cloud", Target: "snap_root", Depth: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Initial scan ONLY checks junk (user forgot duplicate!)
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:   []string{"custom:" + ct.ID},
+		EnableJunk:   true,
+		ForceRefresh: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var snap CenterJobState
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Snapshot == nil || !snap.Snapshot.Ready {
+		t.Fatalf("expected ready snapshot, got %+v", snap)
+	}
+	if snap.Plan.Counts["junk"] != 1 || snap.Plan.Counts["duplicate"] != 0 {
+		t.Fatalf("expected junk=1, dup=0; got %+v", snap.Plan.Counts)
+	}
+
+	// 2. User realizes they forgot duplicate! Recompute preview with ZERO 115 API calls!
+	plan2, _, err := svc.RecomputeCenterPreview(CenterScanRequest{
+		TargetKeys:      []string{"custom:" + ct.ID},
+		EnableJunk:      true,
+		EnableDuplicate: true,
+	})
+	if err != nil {
+		t.Fatalf("RecomputeCenterPreview failed: %v", err)
+	}
+	if plan2.Counts["junk"] != 1 || plan2.Counts["duplicate"] != 1 {
+		t.Fatalf("expected junk=1 and dup=1 from 0-API recompute, got %+v", plan2.Counts)
+	}
+
+	// 3. Execute ONLY the junk item -> snapshot auto-syncs so d_only_junk immediately becomes an empty_dir!
+	var junkID string
+	for _, it := range plan2.Items {
+		if it.Tool == "junk" {
+			junkID = it.ID
+		}
+	}
+	if _, err := svc.StartCenterExec([]string{junkID}); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Result.DeletedCount != 1 {
+		t.Fatalf("exec junk failed: %+v", snap.Result)
+	}
+
+	// Recompute with EnableEmptyDir=true (0 API calls!) -> d_only_junk MUST now appear as empty_dir!
+	plan3, _, err := svc.RecomputeCenterPreview(CenterScanRequest{
+		TargetKeys:     []string{"custom:" + ct.ID},
+		EnableEmptyDir: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan3.Counts["empty_dir"] != 1 {
+		t.Fatalf("expected newly emptied folder detected from synced snapshot, got %+v", plan3.Counts)
+	}
+
+	// 4. Verify SHA1 blacklist recorded filename + RemoveJunkSHA1 + ClearJunkSHA1 work
+	wb := svc.WorkbenchConfig(t.Context())
+	if wb.JunkSHA1Names["junksha999"] != "广告.txt" {
+		t.Fatalf("expected SHA1 name recorded as 广告.txt, got %+v", wb.JunkSHA1Names)
+	}
+	wb2, err := svc.RemoveJunkSHA1(t.Context(), "junksha999")
+	if err != nil || len(wb2.JunkSHA1Blacklist) != 0 {
+		t.Fatalf("RemoveJunkSHA1 failed: %+v err=%v", wb2.JunkSHA1Blacklist, err)
+	}
+}

@@ -348,12 +348,14 @@
                   <span>目录整理</span>
                 </h2>
                 <div class="toolbar">
-                  <button type="button" id="oc-scan-btn" class="btn btn-primary btn-sm" onclick="startCenterScan(this)">扫描预览</button>
+                  <button type="button" id="oc-preview-btn" class="btn btn-secondary btn-sm" style="display:none;" onclick="recomputeCenterPreview(this)">⚡ 刷新预览</button>
+                  <button type="button" id="oc-scan-btn" class="btn btn-primary btn-sm" onclick="startCenterScan(this, true)">📥 拉取快照</button>
                   <button type="button" id="oc-cancel-btn" class="btn btn-danger btn-sm" style="display:none;" onclick="cancelCenterJob(this)">停止</button>
                 </div>
               </div>
               <div class="panel-body">
                 <div id="oc-target-checks" class="toggle-row"></div>
+                <div id="oc-snap-bar" style="display:none;margin-top:10px;padding:7px 11px;border-radius:8px;background:var(--surface-elevated);border:1px solid var(--border);font-size:12px;color:var(--text-secondary);"></div>
 
                 <details class="details-box" style="margin-top:12px;">
                   <summary>+ 自定义整理目录（115 CID / 本地路径）</summary>
@@ -391,13 +393,13 @@
                 </details>
 
                 <div class="toggle-row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
-                  <label class="check-label"><input id="oc-tool-date" type="checkbox" checked /> 📅 日期归档</label>
-                  <label class="check-label"><input id="oc-tool-rename" type="checkbox" onchange="toggleOcRuleFields()" /> ✏️ 批量洗名</label>
-                  <label class="check-label"><input id="oc-tool-dup" type="checkbox" checked onchange="toggleOcRuleFields()" /> 👯 SHA1查重</label>
-                  <label class="check-label"><input id="oc-tool-junk" type="checkbox" onchange="toggleOcRuleFields()" /> 🧹 垃圾清理</label>
-                  <label class="check-label"><input id="oc-tool-cls" type="checkbox" onchange="toggleOcRuleFields()" /> 🗂️ 文件归类</label>
-                  <label class="check-label"><input id="oc-tool-flat" type="checkbox" /> 📦 套娃解包</label>
-                  <label class="check-label"><input id="oc-tool-empty" type="checkbox" /> 📂 空目录</label>
+                  <label class="check-label"><input id="oc-tool-date" type="checkbox" checked onchange="onOcToolChange()" /> 📅 日期归档</label>
+                  <label class="check-label"><input id="oc-tool-rename" type="checkbox" onchange="onOcToolChange()" /> ✏️ 批量洗名</label>
+                  <label class="check-label"><input id="oc-tool-dup" type="checkbox" checked onchange="onOcToolChange()" /> 👯 SHA1查重</label>
+                  <label class="check-label"><input id="oc-tool-junk" type="checkbox" onchange="onOcToolChange()" /> 🧹 垃圾清理</label>
+                  <label class="check-label"><input id="oc-tool-cls" type="checkbox" onchange="onOcToolChange()" /> 🗂️ 文件归类</label>
+                  <label class="check-label"><input id="oc-tool-flat" type="checkbox" onchange="onOcToolChange()" /> 📦 套娃解包</label>
+                  <label class="check-label"><input id="oc-tool-empty" type="checkbox" onchange="onOcToolChange()" /> 📂 空目录</label>
                 </div>
 
                 <div id="oc-extra-opts" style="display:none;margin-top:12px;padding:12px;border-radius:10px;background:var(--surface-elevated);border:1px solid var(--border);">
@@ -460,8 +462,19 @@
                     </div>
                   </div>
                   <div class="toolbar" style="margin-top:10px;justify-content:space-between;">
-                    <span id="oc-sha1-bl-info" class="field-help"></span>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="saveWorkbenchRules(this)">保存规则</button>
+                    <button type="button" id="oc-sha1-bl-btn" class="btn btn-ghost btn-sm" onclick="toggleSHA1Drawer()">🚫 SHA1黑名单 (0)</button>
+                    <div class="toolbar">
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="saveWorkbenchRules(this)">保存规则</button>
+                    </div>
+                  </div>
+                  <div id="oc-sha1-drawer" style="display:none;margin-top:10px;padding:10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);">
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;">
+                      <input id="oc-sha1-search" type="text" placeholder="搜索 SHA1 或文件名…" oninput="renderSHA1Blacklist()" style="flex:1;min-width:140px;" />
+                      <input id="oc-sha1-add-input" type="text" placeholder="手动输入 SHA1…" style="flex:1;min-width:140px;" />
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="addManualSHA1(this)">添加</button>
+                      <button type="button" class="btn btn-danger btn-sm" onclick="clearBlacklistedSHA1(this)">清空</button>
+                    </div>
+                    <div id="oc-sha1-list" style="max-height:210px;overflow:auto;font-size:12px;"></div>
                   </div>
                 </div>
 

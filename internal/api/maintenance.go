@@ -214,6 +214,20 @@ func (s *Server) handleCenterScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": jobID, "status": "running"})
 }
 
+func (s *Server) handleCenterPreview(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.CenterScanRequest
+	if err := decodeJSON(r, &req, 32*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	plan, snapInfo, err := s.pipeline.RecomputeCenterPreview(req)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plan": plan, "snapshot": snapInfo})
+}
+
 func (s *Server) handleCenterExec(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ItemIDs []string `json:"item_ids"`
@@ -269,16 +283,35 @@ func (s *Server) handlePutWorkbenchConfig(w http.ResponseWriter, r *http.Request
 func (s *Server) handleBlacklistSHA1(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SHA1 string `json:"sha1"`
+		Name string `json:"name"`
 	}
 	if err := decodeJSON(r, &req, 4096); err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
 		return
 	}
-	saved, err := s.pipeline.AddJunkSHA1(r.Context(), req.SHA1)
+	saved, err := s.pipeline.AddJunkSHA1(r.Context(), req.SHA1, req.Name)
 	if errors.Is(err, store.ErrInvalid) {
 		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "valid sha1 required")
 		return
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleDeleteBlacklistSHA1(w http.ResponseWriter, r *http.Request) {
+	saved, err := s.pipeline.RemoveJunkSHA1(r.Context(), r.PathValue("sha1"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleClearBlacklistSHA1(w http.ResponseWriter, r *http.Request) {
+	saved, err := s.pipeline.ClearJunkSHA1(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return

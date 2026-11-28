@@ -131,6 +131,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/organizer/targets", s.requireRole("admin", s.handleUpsertOrganizeTarget))
 	s.mux.HandleFunc("DELETE /api/v1/organizer/targets/{id}", s.requireRole("admin", s.handleDeleteOrganizeTarget))
 	s.mux.HandleFunc("POST /api/v1/organizer/center/scan", s.requireRole("admin", s.handleCenterScan))
+	s.mux.HandleFunc("POST /api/v1/organizer/center/preview", s.requireRole("admin", s.handleCenterPreview))
 	s.mux.HandleFunc("POST /api/v1/organizer/center/exec", s.requireRole("admin", s.handleCenterExec))
 	s.mux.HandleFunc("GET /api/v1/organizer/center/state", s.requireRole("readonly", s.handleCenterState))
 	s.mux.HandleFunc("POST /api/v1/organizer/center/cancel", s.requireRole("admin", s.handleCenterCancel))
@@ -138,6 +139,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/organizer/workbench", s.requireRole("admin", s.handleGetWorkbenchConfig))
 	s.mux.HandleFunc("PUT /api/v1/organizer/workbench", s.requireRole("admin", s.handlePutWorkbenchConfig))
 	s.mux.HandleFunc("POST /api/v1/organizer/workbench/blacklist-sha1", s.requireRole("admin", s.handleBlacklistSHA1))
+	s.mux.HandleFunc("DELETE /api/v1/organizer/workbench/blacklist-sha1/{sha1}", s.requireRole("admin", s.handleDeleteBlacklistSHA1))
+	s.mux.HandleFunc("DELETE /api/v1/organizer/workbench/blacklist-sha1", s.requireRole("admin", s.handleClearBlacklistSHA1))
 
 	// Sources & Rules
 	s.mux.HandleFunc("GET /api/v1/sources", s.requireRole("readonly", s.handleListSources))

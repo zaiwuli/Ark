@@ -1275,11 +1275,88 @@ function applyWorkbenchToUI(wb) {
   setChk('oc-ren-regex', wb.rename_regex);
   setVal('oc-ren-prefix', wb.rename_prefix);
   setVal('oc-cls-mode', wb.classify_mode || 'type');
-  const blInfo = document.getElementById('oc-sha1-bl-info');
-  if (blInfo) {
+  const blBtn = document.getElementById('oc-sha1-bl-btn');
+  if (blBtn) {
     const n = (wb.junk_sha1_blacklist || []).length;
-    blInfo.textContent = n ? `已拉黑 ${n} 条广告 SHA1` : '';
+    blBtn.textContent = `🚫 SHA1黑名单 (${n})`;
   }
+  renderSHA1Blacklist();
+}
+
+function toggleSHA1Drawer() {
+  const el = document.getElementById('oc-sha1-drawer');
+  if (!el) return;
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  if (show) renderSHA1Blacklist();
+}
+
+function renderSHA1Blacklist() {
+  const listEl = document.getElementById('oc-sha1-list');
+  if (!listEl) return;
+  const list = ocWorkbenchCfg?.junk_sha1_blacklist || [];
+  const names = ocWorkbenchCfg?.junk_sha1_names || {};
+  const q = (document.getElementById('oc-sha1-search')?.value || '').trim().toLowerCase();
+  const filtered = list.filter((h) => !q || h.toLowerCase().includes(q) || (names[h] || '').toLowerCase().includes(q));
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="field-help" style="padding:6px 2px;">${list.length ? '未搜索到匹配的 SHA1' : '暂无已拉黑的广告 SHA1（删除垃圾后会自动记录）'}</div>`;
+    return;
+  }
+  listEl.innerHTML = filtered.map((h) => {
+    const nm = names[h] ? `<span style="margin-right:6px;">${esc(names[h])}</span>` : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 2px;border-bottom:1px solid var(--border);">
+      <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${nm}<code style="font-size:11px;">${esc(h)}</code></div>
+      <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px;flex-shrink:0;" onclick="removeBlacklistedSHA1('${esc(h)}', this)">移除</button>
+    </div>`;
+  }).join('');
+}
+
+async function addManualSHA1(btn) {
+  const inp = document.getElementById('oc-sha1-add-input');
+  const sha1 = (inp?.value || '').trim();
+  if (sha1.length < 8) return showToast('请输入有效的 SHA1');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/workbench/blacklist-sha1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha1 }),
+    });
+    if (r.ok) {
+      ocWorkbenchCfg = await r.json();
+      if (inp) inp.value = '';
+      applyWorkbenchToUI(ocWorkbenchCfg);
+      showToast('已加入 SHA1 黑名单');
+    } else {
+      showToast('SHA1 格式无效');
+    }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function removeBlacklistedSHA1(sha1, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/workbench/blacklist-sha1/' + encodeURIComponent(sha1), { method: 'DELETE' });
+    if (r.ok) {
+      ocWorkbenchCfg = await r.json();
+      applyWorkbenchToUI(ocWorkbenchCfg);
+      showToast('已从黑名单移除');
+    }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function clearBlacklistedSHA1(btn) {
+  const n = (ocWorkbenchCfg?.junk_sha1_blacklist || []).length;
+  if (!n || !confirm(`确认清空全部 ${n} 条广告 SHA1 黑名单？`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/workbench/blacklist-sha1', { method: 'DELETE' });
+    if (r.ok) {
+      ocWorkbenchCfg = await r.json();
+      applyWorkbenchToUI(ocWorkbenchCfg);
+      showToast('已清空 SHA1 黑名单');
+    }
+  } finally { if (btn) btn.disabled = false; }
 }
 
 function collectWorkbenchPayload() {
@@ -1290,6 +1367,7 @@ function collectWorkbenchPayload() {
     junk_max_mb: Number(document.getElementById('oc-junk-mb')?.value) || 0,
     junk_safe_exts: document.getElementById('oc-junk-safe')?.value.trim() || '',
     junk_sha1_blacklist: ocWorkbenchCfg?.junk_sha1_blacklist || [],
+    junk_sha1_names: ocWorkbenchCfg?.junk_sha1_names || {},
     dedup_keep_policy: document.getElementById('oc-dup-policy')?.value || 'cleanest',
     rename_clean_ads: !!document.getElementById('oc-ren-ads')?.checked,
     rename_find: document.getElementById('oc-ren-find')?.value || '',
@@ -1316,14 +1394,14 @@ async function saveWorkbenchRules(btn) {
   } finally { if (btn) btn.disabled = false; }
 }
 
-async function blacklistItemSHA1(sha1, btn) {
+async function blacklistItemSHA1(sha1, name, btn) {
   if (!sha1) return;
   if (btn) btn.disabled = true;
   try {
     const r = await fetch('/api/v1/organizer/workbench/blacklist-sha1', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sha1 }),
+      body: JSON.stringify({ sha1, name: name || '' }),
     });
     if (r.ok) {
       ocWorkbenchCfg = await r.json();
@@ -1345,9 +1423,72 @@ async function undoCenterRename(btn) {
   } finally { btn.disabled = false; }
 }
 
-async function startCenterScan(btn) {
+function buildCenterScanPayload(forceRefresh) {
   const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
-  if (!target_keys.length) return showToast('请先至少勾选一个要扫描的目录');
+  const wb = collectWorkbenchPayload();
+  return {
+    target_keys,
+    force_refresh: !!forceRefresh,
+    enable_date_archive: document.getElementById('oc-tool-date').checked,
+    enable_rename: document.getElementById('oc-tool-rename').checked,
+    enable_duplicate: document.getElementById('oc-tool-dup').checked,
+    enable_junk: document.getElementById('oc-tool-junk').checked,
+    enable_classify: document.getElementById('oc-tool-cls').checked,
+    enable_flatten: document.getElementById('oc-tool-flat').checked,
+    enable_empty_dir: document.getElementById('oc-tool-empty').checked,
+    ...wb,
+  };
+}
+
+function hasMatchingSnapshot(targetKeys) {
+  const snap = ocState.snapshot;
+  if (!snap || !snap.ready || !snap.expires_at) return false;
+  if (Math.floor(Date.now() / 1000) > snap.expires_at) return false;
+  const a = [...(snap.target_keys || [])].sort();
+  const b = [...(targetKeys || [])].sort();
+  return a.length > 0 && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+async function recomputeCenterPreview(btn, silent) {
+  const payload = buildCenterScanPayload(false);
+  if (!payload.target_keys.length) {
+    if (!silent) showToast('请先至少勾选一个目录');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const wb = collectWorkbenchPayload();
+    fetch('/api/v1/organizer/workbench', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(wb),
+    }).catch(() => {});
+    const r = await fetch('/api/v1/organizer/center/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (!silent) showToast(d.error?.code === 'SNAPSHOT_TARGET_MISMATCH' ? '目标已变更，请重新点「拉取快照」' : '暂无可用快照，请先点「拉取快照」');
+      return;
+    }
+    await pollCenterState();
+    if (!silent) showToast(`已基于本地快照秒刷预览（命中 ${(d.plan?.items || []).length} 项 · 0 请求）`);
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function onOcToolChange() {
+  toggleOcRuleFields();
+  const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
+  if (hasMatchingSnapshot(target_keys) && ocState.lastStatus !== 'running') {
+    recomputeCenterPreview(null, true);
+  }
+}
+
+async function startCenterScan(btn, forceRefresh) {
+  const payload = buildCenterScanPayload(forceRefresh);
+  if (!payload.target_keys.length) return showToast('请先至少勾选一个要扫描的目录');
   btn.disabled = true;
   try {
     const wb = collectWorkbenchPayload();
@@ -1359,21 +1500,11 @@ async function startCenterScan(btn) {
     const r = await fetch('/api/v1/organizer/center/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        target_keys,
-        enable_date_archive: document.getElementById('oc-tool-date').checked,
-        enable_rename: document.getElementById('oc-tool-rename').checked,
-        enable_duplicate: document.getElementById('oc-tool-dup').checked,
-        enable_junk: document.getElementById('oc-tool-junk').checked,
-        enable_classify: document.getElementById('oc-tool-cls').checked,
-        enable_flatten: document.getElementById('oc-tool-flat').checked,
-        enable_empty_dir: document.getElementById('oc-tool-empty').checked,
-        ...wb,
-      }),
+      body: JSON.stringify(payload),
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '启动扫描失败');
-    showToast('后台扫描已启动');
+    if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '启动拉取快照失败');
+    showToast(forceRefresh ? '正在后台拉取目录树快照…' : '后台扫描已启动');
     startCenterPolling();
   } finally { btn.disabled = false; }
 }
@@ -1425,7 +1556,34 @@ function renderCenterState(st) {
   const wrap = document.getElementById('oc-progress-wrap');
   const cancelBtn = document.getElementById('oc-cancel-btn');
   const scanBtn = document.getElementById('oc-scan-btn');
+  const previewBtn = document.getElementById('oc-preview-btn');
+  const snapBar = document.getElementById('oc-snap-bar');
   if (!wrap) return;
+
+  const prevStatus = ocState.lastStatus;
+  ocState.lastStatus = st.status;
+  ocState.snapshot = st.snapshot || null;
+
+  if (snapBar) {
+    if (st.snapshot && st.snapshot.ready) {
+      const remMin = Math.max(1, Math.round((st.snapshot.expires_at - Math.floor(Date.now() / 1000)) / 60));
+      const tnames = (st.snapshot.target_names || []).join('、') || '已选目录';
+      snapBar.style.display = 'block';
+      snapBar.innerHTML = `📦 <strong>目录树快照已缓存</strong>：${esc(tnames)} · <strong>${st.snapshot.file_count}</strong> 文件 / <strong>${st.snapshot.dir_count}</strong> 目录（剩余约 ${remMin} 分钟 · 切换勾选工具或改规则后 <strong>0 请求秒刷预览</strong>）`;
+      if (previewBtn) previewBtn.style.display = 'inline-flex';
+      if (scanBtn) scanBtn.textContent = '🔄 刷新快照';
+    } else {
+      snapBar.style.display = 'none';
+      if (previewBtn) previewBtn.style.display = 'none';
+      if (scanBtn) scanBtn.textContent = '📥 拉取快照';
+    }
+  }
+  if (prevStatus === 'running' && st.status === 'done' && st.mode === 'exec') {
+    fetch('/api/v1/organizer/workbench').then((r) => r.json()).then((wb) => {
+      ocWorkbenchCfg = wb;
+      applyWorkbenchToUI(wb);
+    }).catch(() => {});
+  }
 
   const active = st.status === 'running';
   if (st.status && st.status !== 'idle') {
@@ -1530,7 +1688,7 @@ function renderCenterPlanTable() {
     const [tlbl, tcls] = OC_TOOL_LABEL[it.tool] || [it.tool, 'badge-muted'];
     const checked = ocState.checkedIds.has(it.id) ? 'checked' : '';
     const blBtn = it.sha1 && (it.tool === 'junk' || it.tool === 'duplicate')
-      ? ` <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px;" onclick="blacklistItemSHA1('${esc(it.sha1)}', this)">拉黑SHA1</button>`
+      ? ` <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px;" onclick="blacklistItemSHA1('${esc(it.sha1)}', '${esc(it.name)}', this)">拉黑SHA1</button>`
       : '';
     return `
       <tr>

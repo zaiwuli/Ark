@@ -30,6 +30,7 @@ type OrganizeTarget struct {
 
 type CenterScanRequest struct {
 	TargetKeys        []string `json:"target_keys"` // sys:cloud:offline, src:<id>, custom:<id>, ...
+	ForceRefresh      bool     `json:"force_refresh"`
 	EnableDateArchive bool     `json:"enable_date_archive"`
 	EnableDuplicate   bool     `json:"enable_duplicate"`
 	EnableJunk        bool     `json:"enable_junk"`
@@ -105,6 +106,7 @@ type CenterJobState struct {
 	Logs            []string          `json:"logs"`
 	Plan            *CenterScanPlan   `json:"plan,omitempty"`
 	Result          *CenterExecResult `json:"result,omitempty"`
+	Snapshot        *SnapshotInfo     `json:"snapshot,omitempty"`
 	UndoRenameCount int               `json:"undo_rename_count"`
 	StartedAt       int64             `json:"started_at,omitempty"`
 	FinishedAt      int64             `json:"finished_at,omitempty"`
@@ -115,6 +117,7 @@ type organizeCenter struct {
 	state       CenterJobState
 	cancel      context.CancelFunc
 	lastRenames []RenameUndoEntry
+	treeSnap    *OrganizeSnapshot
 }
 
 func newOrganizeCenter() *organizeCenter {
@@ -167,6 +170,7 @@ func (c *organizeCenter) snapshot() CenterJobState {
 		r.Errors = append([]string(nil), c.state.Result.Errors...)
 		cp.Result = &r
 	}
+	cp.Snapshot = c.treeSnap.Info(time.Now())
 	return cp
 }
 
@@ -382,42 +386,12 @@ func (s *Service) StartCenterScan(req CenterScanRequest) (string, error) {
 	return jobID, nil
 }
 
-func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req CenterScanRequest) {
-	defer func() {
-		s.center.mu.Lock()
-		if s.center.state.JobID == jobID && s.center.state.Status == "running" {
-			if ctx.Err() != nil {
-				s.center.state.Status = "cancelled"
-				s.center.state.StageLabel = "已停止扫描"
-				s.center.addLogLocked("扫描已中止。")
-			}
-		}
-		s.center.cancel = nil
-		s.center.state.FinishedAt = time.Now().Unix()
-		s.center.mu.Unlock()
-	}()
-
-	targets := s.resolveCenterTargets(ctx, req.TargetKeys)
-	if len(targets) == 0 {
-		s.center.mu.Lock()
-		s.center.state.Status = "done"
-		s.center.state.StageLabel = "未选择任何有效目录"
-		s.center.state.Plan = &CenterScanPlan{GeneratedAt: time.Now().Unix(), Items: []OrganizeItem{}, Counts: map[string]int{}}
-		s.center.addLogLocked("未勾选有效目录，跳过扫描。")
-		s.center.mu.Unlock()
-		return
-	}
-
-	now := time.Now().In(s.loc)
-	todayStr := now.Format("2006-01-02")
-	activeDates, activeCIDs, _ := s.store.ActiveDatesAndCIDs(ctx)
-	cloud, p115Cfg := s.snapshotCloud()
-
+func (s *Service) mergeWorkbenchReq(ctx context.Context, req CenterScanRequest) WorkbenchConfig {
 	wbCfg := s.WorkbenchConfig(ctx)
 	if strings.TrimSpace(req.JunkExts) != "" {
 		wbCfg.JunkExts = req.JunkExts
 	}
-	if strings.TrimSpace(req.JunkKeywords) != "" {
+	if req.JunkKeywords != "" {
 		wbCfg.JunkKeywords = req.JunkKeywords
 	}
 	if req.JunkKeywordMaxMB != nil {
@@ -446,72 +420,126 @@ func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req Center
 	if req.RenamePrefix != "" {
 		wbCfg.RenamePrefix = req.RenamePrefix
 	}
-	wbCfg = wbCfg.Normalize()
+	return wbCfg.Normalize()
+}
 
-	items := make([]OrganizeItem, 0)
-	counts := map[string]int{
-		"date_archive": 0,
-		"duplicate":    0,
-		"junk":         0,
-		"classify":     0,
-		"empty_dir":    0,
-		"rename":       0,
-		"flatten":      0,
+func (s *Service) collectActiveGuards(ctx context.Context) (map[string]bool, map[string]bool) {
+	activeDates, activeCIDs, _ := s.store.ActiveDatesAndCIDs(ctx)
+	if activeDates == nil {
+		activeDates = map[string]bool{}
 	}
-	nextID := 0
-	makeID := func() string {
-		nextID++
-		return fmt.Sprintf("oi_%d", nextID)
+	if activeCIDs == nil {
+		activeCIDs = map[string]bool{}
+	}
+	return activeDates, activeCIDs
+}
+
+func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req CenterScanRequest) {
+	defer func() {
+		s.center.mu.Lock()
+		if s.center.state.JobID == jobID && s.center.state.Status == "running" {
+			if ctx.Err() != nil {
+				s.center.state.Status = "cancelled"
+				s.center.state.StageLabel = "已停止拉取快照"
+				s.center.addLogLocked("快照拉取已中止。")
+			}
+		}
+		s.center.cancel = nil
+		s.center.state.FinishedAt = time.Now().Unix()
+		s.center.mu.Unlock()
+	}()
+
+	targets := s.resolveCenterTargets(ctx, req.TargetKeys)
+	if len(targets) == 0 {
+		s.center.mu.Lock()
+		s.center.state.Status = "done"
+		s.center.state.StageLabel = "未选择任何有效目录"
+		s.center.state.Plan = &CenterScanPlan{GeneratedAt: time.Now().UnixNano(), Items: []OrganizeItem{}, Counts: map[string]int{}}
+		s.center.addLogLocked("未勾选有效目录，跳过扫描。")
+		s.center.mu.Unlock()
+		return
 	}
 
-	s.center.setProgress(0, len(targets), fmt.Sprintf("开始扫描 0/%d", len(targets)))
+	now := time.Now().In(s.loc)
+	todayStr := now.Format("2006-01-02")
+	activeDates, activeCIDs := s.collectActiveGuards(ctx)
+	cloud, p115Cfg := s.snapshotCloud()
+	wbCfg := s.mergeWorkbenchReq(ctx, req)
 
-	for idx, t := range targets {
+	canonKeys := canonicalTargetKeys(req.TargetKeys)
+
+	// Reuse fresh in-memory snapshot if targets match and ForceRefresh is false (0 API calls!)
+	var snap *OrganizeSnapshot
+	if !req.ForceRefresh {
+		s.center.mu.Lock()
+		if s.center.treeSnap != nil && time.Now().Unix() <= s.center.treeSnap.ExpiresAt && sameStringSlice(s.center.treeSnap.TargetKeys, canonKeys) {
+			snap = s.center.treeSnap
+		}
+		s.center.mu.Unlock()
+	}
+
+	if snap != nil {
+		s.center.addLog("命中 30 分钟目录快照缓存，直接本地秒刷预览（0 次 115 请求）")
+	} else {
+		s.center.setProgress(0, len(targets), fmt.Sprintf("拉取目录快照 0/%d", len(targets)))
+		targetSnaps := make([]TargetSnapshot, 0, len(targets))
+		targetNames := make([]string, 0, len(targets))
+		for idx, t := range targets {
+			if ctx.Err() != nil {
+				return
+			}
+			scopeLabel := "本地"
+			if t.Kind == "cloud" {
+				scopeLabel = "115"
+			}
+			s.center.setProgress(idx, len(targets), fmt.Sprintf("正在拉取 [%s] %s 快照（%d/%d）", scopeLabel, t.Name, idx+1, len(targets)))
+			s.center.addLog(fmt.Sprintf("拉取 [%s] %s 快照（深度 %d 层）…", scopeLabel, t.Name, t.Depth))
+
+			if t.Kind == "cloud" {
+				if cloud == nil {
+					s.center.addLog("跳过 115 目录：尚未配置 115 Cookie。")
+					continue
+				}
+				ts := s.captureCloudTargetSnapshot(ctx, cloud, p115Cfg, t, true)
+				targetSnaps = append(targetSnaps, ts)
+				targetNames = append(targetNames, t.Name)
+				s.center.addLog(fmt.Sprintf("完成 [%s] %s 快照：%d 个文件 / %d 个目录", scopeLabel, t.Name, len(ts.Files), len(ts.Dirs)))
+			} else {
+				ts := s.captureLocalTargetSnapshot(ctx, t)
+				targetSnaps = append(targetSnaps, ts)
+				targetNames = append(targetNames, t.Name)
+				s.center.addLog(fmt.Sprintf("完成 [%s] %s 快照：%d 个文件 / %d 个目录", scopeLabel, t.Name, len(ts.Files), len(ts.Dirs)))
+			}
+		}
 		if ctx.Err() != nil {
 			return
 		}
-		scopeLabel := "本地"
-		if t.Kind == "cloud" {
-			scopeLabel = "115"
+		nowUnix := time.Now().Unix()
+		snap = &OrganizeSnapshot{
+			CreatedAt:   nowUnix,
+			ExpiresAt:   nowUnix + int64(organizeSnapshotTTL.Seconds()),
+			TargetKeys:  canonKeys,
+			TargetNames: targetNames,
+			Targets:     targetSnaps,
 		}
-		s.center.setProgress(idx, len(targets), fmt.Sprintf("正在扫描 [%s] %s（%d/%d）", scopeLabel, t.Name, idx+1, len(targets)))
-		s.center.addLog(fmt.Sprintf("扫描 [%s] %s（深度 %d 层）…", scopeLabel, t.Name, t.Depth))
-
-		if t.Kind == "cloud" {
-			if cloud == nil {
-				s.center.addLog("跳过 115 目录：尚未配置 115 Cookie。")
-				continue
-			}
-			found := s.scanCloudCenterTarget(ctx, cloud, p115Cfg, t, req, wbCfg, todayStr, activeDates, activeCIDs, makeID)
-			for _, it := range found {
-				items = append(items, it)
-				counts[it.Tool]++
-			}
-			s.center.addLog(fmt.Sprintf("完成 [%s] %s：发现 %d 条待处理项", scopeLabel, t.Name, len(found)))
-		} else {
-			found := s.scanLocalCenterTarget(ctx, t, req, wbCfg, todayStr, activeDates, makeID)
-			for _, it := range found {
-				items = append(items, it)
-				counts[it.Tool]++
-			}
-			s.center.addLog(fmt.Sprintf("完成 [%s] %s：发现 %d 条待处理项", scopeLabel, t.Name, len(found)))
-		}
+		s.center.mu.Lock()
+		s.center.treeSnap = snap
+		s.center.mu.Unlock()
 	}
 
-	plan := &CenterScanPlan{
-		GeneratedAt: time.Now().Unix(),
-		Items:       items,
-		Counts:      counts,
-	}
+	plan := s.evaluateSnapshot(snap, req, wbCfg, p115Cfg, todayStr, activeDates, activeCIDs)
+	info := snap.Info(time.Now())
+
 	s.center.mu.Lock()
 	s.center.state.ProgressCur = len(targets)
 	s.center.state.ProgressTotal = len(targets)
 	s.center.state.Status = "done"
-	s.center.state.StageLabel = fmt.Sprintf("扫描完成，共发现 %d 条待整理项", len(items))
+	s.center.state.StageLabel = fmt.Sprintf("扫描完成，共发现 %d 条待整理项（快照已缓存 30 分钟）", len(plan.Items))
 	s.center.state.Plan = plan
+	s.center.state.Snapshot = info
 	s.center.state.UndoRenameCount = len(s.center.lastRenames)
-	s.center.addLogLocked(fmt.Sprintf("扫描完成：日期 %d · 洗名 %d · 查重 %d · 垃圾 %d · 归类 %d · 解包 %d · 空目录 %d",
-		counts["date_archive"], counts["rename"], counts["duplicate"], counts["junk"], counts["classify"], counts["flatten"], counts["empty_dir"]))
+	s.center.addLogLocked(fmt.Sprintf("预览就绪：日期 %d · 洗名 %d · 查重 %d · 垃圾 %d · 归类 %d · 解包 %d · 空目录 %d",
+		plan.Counts["date_archive"], plan.Counts["rename"], plan.Counts["duplicate"], plan.Counts["junk"], plan.Counts["classify"], plan.Counts["flatten"], plan.Counts["empty_dir"]))
 	s.center.mu.Unlock()
 }
 
@@ -1401,11 +1429,11 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	res := &CenterExecResult{}
 	completedIDs := make(map[string]bool)
 	var undoBatch []RenameUndoEntry
-	var deletedJunkSHA1s []string
+	deletedJunkSHA1s := make(map[string]string)
 
 	defer func() {
 		if len(deletedJunkSHA1s) > 0 {
-			if added, err := s.AddJunkSHA1s(context.Background(), deletedJunkSHA1s); err == nil && added > 0 {
+			if added, err := s.AddJunkSHA1WithNames(context.Background(), deletedJunkSHA1s); err == nil && added > 0 {
 				s.center.addLog(fmt.Sprintf("已自动将 %d 个已删垃圾文件的 SHA1 加入黑名单", added))
 			}
 		}
@@ -1414,7 +1442,17 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			s.center.lastRenames = undoBatch
 			s.center.state.UndoRenameCount = len(undoBatch)
 		}
-		// Remove completed items from cached plan so UI stays accurate.
+		// Remove completed items from cached plan AND keep cached snapshot in sync!
+		if len(completedIDs) > 0 {
+			completedList := make([]OrganizeItem, 0, len(completedIDs))
+			for _, it := range selected {
+				if completedIDs[it.ID] {
+					completedList = append(completedList, it)
+				}
+			}
+			syncSnapshotAfterExec(s.center.treeSnap, completedList)
+			s.center.state.Snapshot = s.center.treeSnap.Info(time.Now())
+		}
 		if s.center.state.Plan != nil && len(completedIDs) > 0 {
 			rem := make([]OrganizeItem, 0, len(s.center.state.Plan.Items))
 			counts := map[string]int{"date_archive": 0, "duplicate": 0, "junk": 0, "classify": 0, "empty_dir": 0, "rename": 0, "flatten": 0}
@@ -1502,7 +1540,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				res.DeletedCount++
 				completedIDs[it.ID] = true
 				if it.Tool == "junk" && it.SHA1 != "" && it.Size > 0 {
-					deletedJunkSHA1s = append(deletedJunkSHA1s, it.SHA1)
+					deletedJunkSHA1s[it.SHA1] = it.Name
 				}
 				s.center.addLog("已清理本地：" + it.Name)
 			}
@@ -1677,7 +1715,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			for _, it := range grp {
 				completedIDs[it.ID] = true
 				if it.Tool == "junk" && it.SHA1 != "" && it.Size > 0 {
-					deletedJunkSHA1s = append(deletedJunkSHA1s, it.SHA1)
+					deletedJunkSHA1s[it.SHA1] = it.Name
 				}
 			}
 			s.center.addLog(fmt.Sprintf("115 批量清理成功：%d 项已移入回收站（1 次批处理请求）", len(fids)))
