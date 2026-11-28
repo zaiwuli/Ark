@@ -238,3 +238,50 @@ func (s *Server) handleCenterCancel(w http.ResponseWriter, _ *http.Request) {
 	cancelled := s.pipeline.CancelCenterJob()
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled})
 }
+
+func (s *Server) handleCenterUndoRename(w http.ResponseWriter, r *http.Request) {
+	restored, err := s.pipeline.UndoLastRename(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restored": restored})
+}
+
+func (s *Server) handleGetWorkbenchConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.pipeline.WorkbenchConfig(r.Context()))
+}
+
+func (s *Server) handlePutWorkbenchConfig(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.WorkbenchConfig
+	if err := decodeJSON(r, &req, 64*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	saved, err := s.pipeline.SaveWorkbenchConfig(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleBlacklistSHA1(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SHA1 string `json:"sha1"`
+	}
+	if err := decodeJSON(r, &req, 4096); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid JSON body")
+		return
+	}
+	saved, err := s.pipeline.AddJunkSHA1(r.Context(), req.SHA1)
+	if errors.Is(err, store.ErrInvalid) {
+		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "valid sha1 required")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}

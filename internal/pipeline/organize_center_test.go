@@ -138,3 +138,101 @@ func TestOrganizeCenterCustomTargetsScanAndBatchExec(t *testing.T) {
 		t.Fatalf("expected empty old date dir routed to empty_dir, got counts=%+v", stSnap.Plan.Counts)
 	}
 }
+
+func TestWorkbenchRenameUndoKeywordsSHA1BlacklistAndFlatten(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "ark.db"), filepath.Join(dir, "secret.key"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	mock := p115.NewMockClient()
+	mock.Listings["wb_cid"] = []p115.CloudFile{
+		// Dirty watermarked video (50 MB -> must NOT be deleted by keyword guard < 20 MB, SHOULD be renamed!)
+		{FID: "f_big", CID: "wb_cid", Name: "www.98T.la@【自转】福利合集.mp4", Size: 50 * 1024 * 1024, SHA1: "sha_big"},
+		// Small ad image (1 MB -> matches keyword "宣传" & < 20 MB -> junk!)
+		{FID: "f_kw_ad", CID: "wb_cid", Name: "扫码宣传图.jpg", Size: 1 * 1024 * 1024, SHA1: "sha_kw_ad"},
+		// Blacklisted SHA1 ad video (30 MB -> killed by SHA1 blacklist regardless of size/name!)
+		{FID: "f_bl_ad", CID: "wb_cid", Name: "normal_intro.mp4", Size: 30 * 1024 * 1024, SHA1: "deadbeef1234"},
+		// Subtitle protected by safe whitelist (must NOT be deleted even with keyword!)
+		{FID: "f_sub", CID: "wb_cid", Name: "必看字幕.srt", Size: 2048, SHA1: "sha_sub"},
+		// Single-child nested folder -> flatten!
+		{FID: "d_wrap", CID: "wb_cid", Name: "套娃壳", IsDir: true},
+	}
+	mock.Listings["d_wrap"] = []p115.CloudFile{
+		{FID: "f_inner", CID: "d_wrap", Name: "正片.mkv", Size: 100 * 1024 * 1024, SHA1: "sha_inner"},
+	}
+
+	svc := NewServiceWithOptions(st, ServiceOptions{Timezone: "Asia/Shanghai", DataDir: dir, WorkDir: dir})
+	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "c_root"})
+
+	// Persist SHA1 blacklist
+	if _, err := svc.AddJunkSHA1(t.Context(), "deadbeef1234"); err != nil {
+		t.Fatal(err)
+	}
+	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "测试库", Kind: "cloud", Target: "wb_cid", Depth: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanAds := true
+	kwMax := 20.0
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:       []string{"custom:" + ct.ID},
+		EnableRename:     true,
+		EnableJunk:       true,
+		EnableFlatten:    true,
+		RenameCleanAds:   &cleanAds,
+		JunkKeywords:     "福利,宣传,必看",
+		JunkKeywordMaxMB: &kwMax,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var snap CenterJobState
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Plan == nil {
+		t.Fatalf("scan failed: %+v", snap)
+	}
+	// Expect: junk=2 (f_kw_ad + f_bl_ad; f_big saved by 20MB guard, f_sub saved by .srt whitelist), rename=1 (f_big -> 福利合集.mp4), flatten=1 (d_wrap)
+	if snap.Plan.Counts["junk"] != 2 || snap.Plan.Counts["rename"] != 1 || snap.Plan.Counts["flatten"] != 1 {
+		t.Fatalf("unexpected counts: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
+	}
+
+	// Execute all items
+	ids := make([]string, 0, len(snap.Plan.Items))
+	for _, it := range snap.Plan.Items {
+		ids = append(ids, it.ID)
+	}
+	if _, err := svc.StartCenterExec(ids); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Result == nil || snap.Result.RenamedCount != 1 || snap.Result.DeletedCount != 2 || snap.Result.MovedCount != 1 {
+		t.Fatalf("unexpected exec result: %+v", snap.Result)
+	}
+	if snap.UndoRenameCount != 1 {
+		t.Fatalf("expected UndoRenameCount=1, got %d", snap.UndoRenameCount)
+	}
+
+	// 1-click Undo Rename restores original filename!
+	restored, err := svc.UndoLastRename(t.Context())
+	if err != nil || restored != 1 {
+		t.Fatalf("UndoLastRename failed: restored=%d err=%v", restored, err)
+	}
+	if svc.CenterJobState().UndoRenameCount != 0 {
+		t.Fatalf("expected UndoRenameCount=0 after undo")
+	}
+}

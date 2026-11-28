@@ -17,6 +17,7 @@ type MockClient struct {
 	Snapshots        []OfflineTask
 	Deleted          []string
 	Moved            []string
+	Renamed          []string
 	Life             []LifeEvent
 	PrepareStatuses  []string // optional sequence for testing retry / password / failure
 	PrepareCallCount int
@@ -137,6 +138,23 @@ func (m *MockClient) BatchDelete(_ context.Context, sourceCID string, fids []str
 			}
 		}
 		m.Listings[sourceCID] = filtered
+	}
+	return nil
+}
+
+func (m *MockClient) BatchRename(_ context.Context, sourceCID string, renames map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for fid, newName := range renames {
+		m.Renamed = append(m.Renamed, fid+"->"+newName)
+	}
+	if list, ok := m.Listings[sourceCID]; ok {
+		for i := range list {
+			if nn, exists := renames[list[i].FID]; exists {
+				list[i].Name = nn
+			}
+		}
+		m.Listings[sourceCID] = list
 	}
 	return nil
 }

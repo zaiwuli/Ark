@@ -134,6 +134,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/organizer/center/exec", s.requireRole("admin", s.handleCenterExec))
 	s.mux.HandleFunc("GET /api/v1/organizer/center/state", s.requireRole("readonly", s.handleCenterState))
 	s.mux.HandleFunc("POST /api/v1/organizer/center/cancel", s.requireRole("admin", s.handleCenterCancel))
+	s.mux.HandleFunc("POST /api/v1/organizer/center/undo-rename", s.requireRole("admin", s.handleCenterUndoRename))
+	s.mux.HandleFunc("GET /api/v1/organizer/workbench", s.requireRole("admin", s.handleGetWorkbenchConfig))
+	s.mux.HandleFunc("PUT /api/v1/organizer/workbench", s.requireRole("admin", s.handlePutWorkbenchConfig))
+	s.mux.HandleFunc("POST /api/v1/organizer/workbench/blacklist-sha1", s.requireRole("admin", s.handleBlacklistSHA1))
 
 	// Sources & Rules
 	s.mux.HandleFunc("GET /api/v1/sources", s.requireRole("readonly", s.handleListSources))

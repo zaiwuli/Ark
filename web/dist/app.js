@@ -1158,19 +1158,28 @@ const ocState = {
 
 const OC_TOOL_LABEL = {
   date_archive: ['日期归档', 'badge-info'],
+  rename: ['洗名改名', 'badge-info'],
   duplicate: ['SHA1查重', 'badge-warn'],
-  junk: ['广告垃圾', 'badge-err'],
+  junk: ['垃圾清理', 'badge-err'],
   classify: ['文件归类', 'badge-ok'],
+  flatten: ['套娃解包', 'badge-ok'],
   empty_dir: ['空目录', 'badge-muted'],
 };
 
+let ocWorkbenchCfg = null;
+
 async function loadOrganizeCenter() {
   try {
-    const [srcResp, customResp, st] = await Promise.all([
+    const [srcResp, customResp, st, wb] = await Promise.all([
       fetch('/api/v1/sources').then((r) => r.json()).catch(() => ({ items: [] })),
       fetch('/api/v1/organizer/targets').then((r) => r.json()).catch(() => ({ items: [] })),
       fetch('/api/v1/organizer/center/state').then((r) => r.json()).catch(() => null),
+      fetch('/api/v1/organizer/workbench').then((r) => r.json()).catch(() => null),
     ]);
+    if (wb) {
+      ocWorkbenchCfg = wb;
+      applyWorkbenchToUI(wb);
+    }
     const prevChecked = new Set(Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((e) => e.value));
     const hasPrev = document.querySelectorAll('.oc-target-cb').length > 0;
 
@@ -1251,29 +1260,120 @@ async function deleteOrganizeTarget(id) {
   loadOrganizeCenter();
 }
 
+function applyWorkbenchToUI(wb) {
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  setVal('oc-junk-exts', wb.junk_exts);
+  setVal('oc-junk-kws', wb.junk_keywords);
+  setVal('oc-junk-kwmb', wb.junk_keyword_max_mb ?? 20);
+  setVal('oc-junk-mb', wb.junk_max_mb ?? 0);
+  setVal('oc-junk-safe', wb.junk_safe_exts);
+  setVal('oc-dup-policy', wb.dedup_keep_policy || 'cleanest');
+  setChk('oc-ren-ads', wb.rename_clean_ads !== false);
+  setVal('oc-ren-find', wb.rename_find);
+  setVal('oc-ren-replace', wb.rename_replace);
+  setChk('oc-ren-regex', wb.rename_regex);
+  setVal('oc-ren-prefix', wb.rename_prefix);
+  setVal('oc-cls-mode', wb.classify_mode || 'type');
+  const blInfo = document.getElementById('oc-sha1-bl-info');
+  if (blInfo) {
+    const n = (wb.junk_sha1_blacklist || []).length;
+    blInfo.textContent = n ? `已拉黑 ${n} 条广告 SHA1` : '';
+  }
+}
+
+function collectWorkbenchPayload() {
+  return {
+    junk_exts: document.getElementById('oc-junk-exts')?.value.trim() || '',
+    junk_keywords: document.getElementById('oc-junk-kws')?.value.trim() || '',
+    junk_keyword_max_mb: Number(document.getElementById('oc-junk-kwmb')?.value) || 0,
+    junk_max_mb: Number(document.getElementById('oc-junk-mb')?.value) || 0,
+    junk_safe_exts: document.getElementById('oc-junk-safe')?.value.trim() || '',
+    junk_sha1_blacklist: ocWorkbenchCfg?.junk_sha1_blacklist || [],
+    dedup_keep_policy: document.getElementById('oc-dup-policy')?.value || 'cleanest',
+    rename_clean_ads: !!document.getElementById('oc-ren-ads')?.checked,
+    rename_find: document.getElementById('oc-ren-find')?.value || '',
+    rename_replace: document.getElementById('oc-ren-replace')?.value || '',
+    rename_regex: !!document.getElementById('oc-ren-regex')?.checked,
+    rename_prefix: document.getElementById('oc-ren-prefix')?.value || '',
+    classify_mode: document.getElementById('oc-cls-mode')?.value || 'type',
+  };
+}
+
+async function saveWorkbenchRules(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/workbench', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectWorkbenchPayload()),
+    });
+    if (r.ok) {
+      ocWorkbenchCfg = await r.json();
+      applyWorkbenchToUI(ocWorkbenchCfg);
+      if (btn) showToast('整理规则已保存');
+    }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function blacklistItemSHA1(sha1, btn) {
+  if (!sha1) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/workbench/blacklist-sha1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha1 }),
+    });
+    if (r.ok) {
+      ocWorkbenchCfg = await r.json();
+      applyWorkbenchToUI(ocWorkbenchCfg);
+      showToast('已加入广告 SHA1 黑名单，后续扫描自动拦截');
+    }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function undoCenterRename(btn) {
+  if (!confirm('确认撤销上一次批量改名，恢复所有原文件名？')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/organizer/center/undo-rename', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '撤销失败');
+    showToast(`已恢复 ${d.restored || 0} 个原文件名`);
+    pollCenterState();
+  } finally { btn.disabled = false; }
+}
+
 async function startCenterScan(btn) {
   const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
   if (!target_keys.length) return showToast('请先至少勾选一个要扫描的目录');
   btn.disabled = true;
   try {
+    const wb = collectWorkbenchPayload();
+    await fetch('/api/v1/organizer/workbench', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(wb),
+    }).catch(() => {});
     const r = await fetch('/api/v1/organizer/center/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         target_keys,
         enable_date_archive: document.getElementById('oc-tool-date').checked,
+        enable_rename: document.getElementById('oc-tool-rename').checked,
         enable_duplicate: document.getElementById('oc-tool-dup').checked,
         enable_junk: document.getElementById('oc-tool-junk').checked,
-        junk_exts: document.getElementById('oc-junk-exts').value.trim(),
-        junk_max_mb: Number(document.getElementById('oc-junk-mb').value) || 0,
         enable_classify: document.getElementById('oc-tool-cls').checked,
-        classify_mode: document.getElementById('oc-cls-mode').value,
+        enable_flatten: document.getElementById('oc-tool-flat').checked,
         enable_empty_dir: document.getElementById('oc-tool-empty').checked,
+        ...wb,
       }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) return showToast(zhError(d.error?.code, d.error?.message) || '启动扫描失败');
-    showToast('后台扫描已启动，可实时查看进度与日志');
+    showToast('后台扫描已启动');
     startCenterPolling();
   } finally { btn.disabled = false; }
 }
@@ -1359,9 +1459,14 @@ function renderCenterState(st) {
       }
     }
     planPanel.style.display = 'block';
+    const undoBtn = document.getElementById('oc-undo-btn');
+    if (undoBtn) {
+      undoBtn.style.display = st.undo_rename_count > 0 ? 'inline-flex' : 'none';
+      undoBtn.textContent = `↩️ 撤销改名 (${st.undo_rename_count || 0})`;
+    }
     const counts = st.plan.counts || {};
     document.getElementById('oc-cnt-all').textContent = st.plan.items.length;
-    ['date_archive', 'duplicate', 'junk', 'classify', 'empty_dir'].forEach((k) => {
+    ['date_archive', 'rename', 'duplicate', 'junk', 'classify', 'flatten', 'empty_dir'].forEach((k) => {
       const el = document.getElementById('oc-cnt-' + k);
       if (el) el.textContent = counts[k] || 0;
     });
@@ -1392,16 +1497,24 @@ function toggleCenterAll(checked) {
 }
 
 function toggleOcRuleFields() {
+  const showRen = !!document.getElementById('oc-tool-rename')?.checked;
+  const showDup = !!document.getElementById('oc-tool-dup')?.checked;
   const showJunk = !!document.getElementById('oc-tool-junk')?.checked;
   const showCls = !!document.getElementById('oc-tool-cls')?.checked;
   const wrap = document.getElementById('oc-extra-opts');
-  if (wrap) wrap.style.display = (showJunk || showCls) ? 'grid' : 'none';
-  const j1 = document.getElementById('oc-junk-exts-wrap');
-  const j2 = document.getElementById('oc-junk-mb-wrap');
-  const c1 = document.getElementById('oc-cls-mode-wrap');
-  if (j1) j1.style.display = showJunk ? 'flex' : 'none';
-  if (j2) j2.style.display = showJunk ? 'flex' : 'none';
-  if (c1) c1.style.display = showCls ? 'flex' : 'none';
+  if (wrap) wrap.style.display = (showRen || showDup || showJunk || showCls) ? 'block' : 'none';
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? 'flex' : 'none'; };
+  show('oc-ren-ads-wrap', showRen);
+  show('oc-ren-pref-wrap', showRen);
+  show('oc-ren-find-wrap', showRen);
+  show('oc-ren-rep-wrap', showRen);
+  show('oc-dup-policy-wrap', showDup);
+  show('oc-junk-exts-wrap', showJunk);
+  show('oc-junk-kws-wrap', showJunk);
+  show('oc-junk-kwmb-wrap', showJunk);
+  show('oc-junk-mb-wrap', showJunk);
+  show('oc-junk-safe-wrap', showJunk);
+  show('oc-cls-mode-wrap', showCls);
 }
 
 function updateCenterExecBtn() {
@@ -1416,13 +1529,16 @@ function renderCenterPlanTable() {
   tbody.innerHTML = items.length ? items.map((it) => {
     const [tlbl, tcls] = OC_TOOL_LABEL[it.tool] || [it.tool, 'badge-muted'];
     const checked = ocState.checkedIds.has(it.id) ? 'checked' : '';
+    const blBtn = it.sha1 && (it.tool === 'junk' || it.tool === 'duplicate')
+      ? ` <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:11px;" onclick="blacklistItemSHA1('${esc(it.sha1)}', this)">拉黑SHA1</button>`
+      : '';
     return `
       <tr>
         <td><input type="checkbox" ${checked} onchange="toggleCenterItem('${esc(it.id)}', this.checked)" /></td>
         <td><span class="badge ${tcls}">${tlbl}</span></td>
         <td><span class="badge ${it.scope === 'cloud' ? 'badge-ok' : 'badge-info'}">${it.scope === 'cloud' ? '115' : '本地'}</span> ${esc(it.target_name)}</td>
         <td><strong>${esc(it.name)}</strong>${it.size ? ` <span class="field-help">(${fmtSize(it.size)})</span>` : ''}</td>
-        <td>${esc(it.detail)}</td>
+        <td>${esc(it.detail)}${blBtn}</td>
         <td><code>${esc(it.dest_label)}</code></td>
       </tr>`;
   }).join('') : '<tr><td colspan="6" class="field-help">当前分类下暂无待整理项</td></tr>';

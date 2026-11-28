@@ -33,32 +33,50 @@ type CenterScanRequest struct {
 	EnableDateArchive bool     `json:"enable_date_archive"`
 	EnableDuplicate   bool     `json:"enable_duplicate"`
 	EnableJunk        bool     `json:"enable_junk"`
-	JunkExts          string   `json:"junk_exts"`   // e.g. ".txt,.url,.html,.htm,.apk,.nfo,.lnk"
-	JunkMaxMB         float64  `json:"junk_max_mb"` // 0 = disabled
 	EnableClassify    bool     `json:"enable_classify"`
-	ClassifyMode      string   `json:"classify_mode"` // type | month
 	EnableEmptyDir    bool     `json:"enable_empty_dir"`
+	EnableRename      bool     `json:"enable_rename"`
+	EnableFlatten     bool     `json:"enable_flatten"`
+
+	// Optional overrides (if omitted, persisted WorkbenchConfig is used)
+	JunkExts         string   `json:"junk_exts"`
+	JunkKeywords     string   `json:"junk_keywords"`
+	JunkKeywordMaxMB *float64 `json:"junk_keyword_max_mb,omitempty"`
+	JunkMaxMB        *float64 `json:"junk_max_mb,omitempty"`
+	JunkSafeExts     string   `json:"junk_safe_exts"`
+	DedupKeepPolicy  string   `json:"dedup_keep_policy"`
+	ClassifyMode     string   `json:"classify_mode"`
+	RenameCleanAds   *bool    `json:"rename_clean_ads,omitempty"`
+	RenameFind       string   `json:"rename_find"`
+	RenameReplace    string   `json:"rename_replace"`
+	RenameRegex      bool     `json:"rename_regex"`
+	RenamePrefix     string   `json:"rename_prefix"`
 }
 
 type OrganizeItem struct {
 	ID         string `json:"id"`
-	Tool       string `json:"tool"`        // date_archive | duplicate | junk | classify | empty_dir
+	Tool       string `json:"tool"`        // date_archive | duplicate | junk | classify | empty_dir | rename | flatten
 	Scope      string `json:"scope"`       // cloud | local
 	TargetName string `json:"target_name"` // display name of source target
 	Name       string `json:"name"`        // filename or folder name
+	NewName    string `json:"new_name,omitempty"`
+	SHA1       string `json:"sha1,omitempty"`
 	Size       int64  `json:"size"`
 	Detail     string `json:"detail"`     // human-readable reason / match info
-	Action     string `json:"action"`     // move | delete
+	Action     string `json:"action"`     // move | delete | rename | flatten
 	DestLabel  string `json:"dest_label"` // display destination
 
 	// Internal execution metadata (omitted from JSON responses)
-	SourceCID   string `json:"-"`
-	RootCID     string `json:"-"`
-	FID         string `json:"-"`
-	SourcePath  string `json:"-"`
-	RootPath    string `json:"-"`
-	DestSubdir  string `json:"-"`
-	DateStr     string `json:"-"`
+	SourceCID  string `json:"-"`
+	RootCID    string `json:"-"`
+	FID        string `json:"-"`
+	ChildFID   string `json:"-"`
+	ChildName  string `json:"-"`
+	SourcePath string `json:"-"`
+	RootPath   string `json:"-"`
+	ChildPath  string `json:"-"`
+	DestSubdir string `json:"-"`
+	DateStr    string `json:"-"`
 }
 
 type CenterScanPlan struct {
@@ -70,30 +88,33 @@ type CenterScanPlan struct {
 type CenterExecResult struct {
 	MovedCount   int      `json:"moved_count"`
 	DeletedCount int      `json:"deleted_count"`
+	RenamedCount int      `json:"renamed_count"`
 	FailedCount  int      `json:"failed_count"`
 	SkippedCount int      `json:"skipped_count"`
 	Errors       []string `json:"errors,omitempty"`
 }
 
 type CenterJobState struct {
-	JobID         string            `json:"job_id"`
-	Mode          string            `json:"mode"`   // "" | scan | exec
-	Status        string            `json:"status"` // idle | running | done | cancelled | failed
-	ProgressCur   int               `json:"progress_cur"`
-	ProgressTotal int               `json:"progress_total"`
-	StageLabel    string            `json:"stage_label"`
-	Error         string            `json:"error,omitempty"`
-	Logs          []string          `json:"logs"`
-	Plan          *CenterScanPlan   `json:"plan,omitempty"`
-	Result        *CenterExecResult `json:"result,omitempty"`
-	StartedAt     int64             `json:"started_at,omitempty"`
-	FinishedAt    int64             `json:"finished_at,omitempty"`
+	JobID           string            `json:"job_id"`
+	Mode            string            `json:"mode"`   // "" | scan | exec
+	Status          string            `json:"status"` // idle | running | done | cancelled | failed
+	ProgressCur     int               `json:"progress_cur"`
+	ProgressTotal   int               `json:"progress_total"`
+	StageLabel      string            `json:"stage_label"`
+	Error           string            `json:"error,omitempty"`
+	Logs            []string          `json:"logs"`
+	Plan            *CenterScanPlan   `json:"plan,omitempty"`
+	Result          *CenterExecResult `json:"result,omitempty"`
+	UndoRenameCount int               `json:"undo_rename_count"`
+	StartedAt       int64             `json:"started_at,omitempty"`
+	FinishedAt      int64             `json:"finished_at,omitempty"`
 }
 
 type organizeCenter struct {
-	mu     sync.Mutex
-	state  CenterJobState
-	cancel context.CancelFunc
+	mu          sync.Mutex
+	state       CenterJobState
+	cancel      context.CancelFunc
+	lastRenames []RenameUndoEntry
 }
 
 func newOrganizeCenter() *organizeCenter {
@@ -391,11 +412,41 @@ func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req Center
 	todayStr := now.Format("2006-01-02")
 	activeDates, activeCIDs, _ := s.store.ActiveDatesAndCIDs(ctx)
 	cloud, p115Cfg := s.snapshotCloud()
-	junkExts := parseExtSet(req.JunkExts)
-	junkMaxBytes := int64(req.JunkMaxMB * 1024 * 1024)
-	if req.ClassifyMode != "month" {
-		req.ClassifyMode = "type"
+
+	wbCfg := s.WorkbenchConfig(ctx)
+	if strings.TrimSpace(req.JunkExts) != "" {
+		wbCfg.JunkExts = req.JunkExts
 	}
+	if strings.TrimSpace(req.JunkKeywords) != "" {
+		wbCfg.JunkKeywords = req.JunkKeywords
+	}
+	if req.JunkKeywordMaxMB != nil {
+		wbCfg.JunkKeywordMaxMB = *req.JunkKeywordMaxMB
+	}
+	if req.JunkMaxMB != nil {
+		wbCfg.JunkMaxMB = *req.JunkMaxMB
+	}
+	if strings.TrimSpace(req.JunkSafeExts) != "" {
+		wbCfg.JunkSafeExts = req.JunkSafeExts
+	}
+	if req.DedupKeepPolicy != "" {
+		wbCfg.DedupKeepPolicy = req.DedupKeepPolicy
+	}
+	if req.ClassifyMode != "" {
+		wbCfg.ClassifyMode = req.ClassifyMode
+	}
+	if req.RenameCleanAds != nil {
+		wbCfg.RenameCleanAds = *req.RenameCleanAds
+	}
+	if req.RenameFind != "" || req.RenameReplace != "" {
+		wbCfg.RenameFind = req.RenameFind
+		wbCfg.RenameReplace = req.RenameReplace
+		wbCfg.RenameRegex = req.RenameRegex
+	}
+	if req.RenamePrefix != "" {
+		wbCfg.RenamePrefix = req.RenamePrefix
+	}
+	wbCfg = wbCfg.Normalize()
 
 	items := make([]OrganizeItem, 0)
 	counts := map[string]int{
@@ -404,6 +455,8 @@ func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req Center
 		"junk":         0,
 		"classify":     0,
 		"empty_dir":    0,
+		"rename":       0,
+		"flatten":      0,
 	}
 	nextID := 0
 	makeID := func() string {
@@ -429,14 +482,14 @@ func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req Center
 				s.center.addLog("跳过 115 目录：尚未配置 115 Cookie。")
 				continue
 			}
-			found := s.scanCloudCenterTarget(ctx, cloud, p115Cfg, t, req, todayStr, activeDates, activeCIDs, junkExts, junkMaxBytes, makeID)
+			found := s.scanCloudCenterTarget(ctx, cloud, p115Cfg, t, req, wbCfg, todayStr, activeDates, activeCIDs, makeID)
 			for _, it := range found {
 				items = append(items, it)
 				counts[it.Tool]++
 			}
 			s.center.addLog(fmt.Sprintf("完成 [%s] %s：发现 %d 条待处理项", scopeLabel, t.Name, len(found)))
 		} else {
-			found := s.scanLocalCenterTarget(ctx, t, req, todayStr, activeDates, junkExts, junkMaxBytes, makeID)
+			found := s.scanLocalCenterTarget(ctx, t, req, wbCfg, todayStr, activeDates, makeID)
 			for _, it := range found {
 				items = append(items, it)
 				counts[it.Tool]++
@@ -456,9 +509,69 @@ func (s *Service) runCenterScanJob(ctx context.Context, jobID string, req Center
 	s.center.state.Status = "done"
 	s.center.state.StageLabel = fmt.Sprintf("扫描完成，共发现 %d 条待整理项", len(items))
 	s.center.state.Plan = plan
-	s.center.addLogLocked(fmt.Sprintf("扫描全部完成：日期归档 %d · 查重 %d · 垃圾 %d · 归类 %d · 空目录 %d",
-		counts["date_archive"], counts["duplicate"], counts["junk"], counts["classify"], counts["empty_dir"]))
+	s.center.state.UndoRenameCount = len(s.center.lastRenames)
+	s.center.addLogLocked(fmt.Sprintf("扫描完成：日期 %d · 洗名 %d · 查重 %d · 垃圾 %d · 归类 %d · 解包 %d · 空目录 %d",
+		counts["date_archive"], counts["rename"], counts["duplicate"], counts["junk"], counts["classify"], counts["flatten"], counts["empty_dir"]))
 	s.center.mu.Unlock()
+}
+
+func evalJunkFile(name, sha1 string, size int64, junkExts, safeExts, sha1BL map[string]bool, keywords []string, kwMaxBytes, maxBytes int64, maxMB, kwMaxMB float64) (bool, string) {
+	if sha1 != "" && sha1BL[strings.ToLower(sha1)] {
+		return true, "命中广告 SHA1 黑名单"
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if safeExts[ext] {
+		return false, ""
+	}
+	if junkExts[ext] {
+		return true, "命中垃圾扩展名 " + ext
+	}
+	if len(keywords) > 0 {
+		if kw := matchKeyword(name, keywords); kw != "" {
+			if kwMaxBytes <= 0 || size <= kwMaxBytes {
+				if kwMaxMB > 0 {
+					return true, fmt.Sprintf("命中关键词「%s」且 < %.0f MB", kw, kwMaxMB)
+				}
+				return true, "命中关键词「" + kw + "」"
+			}
+		}
+	}
+	if maxBytes > 0 && size > 0 && size < maxBytes {
+		return true, fmt.Sprintf("小于 %.1f MB", maxMB)
+	}
+	return false, ""
+}
+
+func pickDupKeeperIndex(names []string, mods []int64, policy string) int {
+	if len(names) <= 1 {
+		return 0
+	}
+	best := 0
+	for i := 1; i < len(names); i++ {
+		switch policy {
+		case "newest":
+			if mods[i] > mods[best] {
+				best = i
+			}
+		case "oldest":
+			if mods[i] > 0 && (mods[best] == 0 || mods[i] < mods[best]) {
+				best = i
+			}
+		default: // "cleanest": prefer shorter filename without URL/@ watermark
+			scoreI := len([]rune(names[i]))
+			if strings.Contains(names[i], "@") || strings.Contains(strings.ToLower(names[i]), "www.") {
+				scoreI += 40
+			}
+			scoreB := len([]rune(names[best]))
+			if strings.Contains(names[best], "@") || strings.Contains(strings.ToLower(names[best]), "www.") {
+				scoreB += 40
+			}
+			if scoreI < scoreB {
+				best = i
+			}
+		}
+	}
+	return best
 }
 
 func (s *Service) scanCloudCenterTarget(
@@ -467,10 +580,9 @@ func (s *Service) scanCloudCenterTarget(
 	p115Cfg P115Settings,
 	t resolvedCenterTarget,
 	req CenterScanRequest,
+	wbCfg WorkbenchConfig,
 	todayStr string,
 	activeDates, activeCIDs map[string]bool,
-	junkExts map[string]bool,
-	junkMaxBytes int64,
 	makeID func() string,
 ) []OrganizeItem {
 	type dirNode struct {
@@ -482,8 +594,23 @@ func (s *Service) scanCloudCenterTarget(
 	visited := make(map[string]bool)
 	const maxDirs = 40
 
+	junkExts := parseExtSet(wbCfg.JunkExts)
+	safeExts := parseExtSet(wbCfg.JunkSafeExts)
+	sha1BL := make(map[string]bool, len(wbCfg.JunkSHA1Blacklist))
+	for _, h := range wbCfg.JunkSHA1Blacklist {
+		sha1BL[strings.ToLower(h)] = true
+	}
+	keywords := parseKeywords(wbCfg.JunkKeywords)
+	kwMaxBytes := int64(wbCfg.JunkKeywordMaxMB * 1024 * 1024)
+	junkMaxBytes := int64(wbCfg.JunkMaxMB * 1024 * 1024)
+
+	type cloudFileRec struct {
+		f      p115.CloudFile
+		curCID string
+		depth  int
+	}
+	var allFiles []cloudFileRec
 	var out []OrganizeItem
-	sha1Seen := make(map[string]string) // sha1 -> first kept filename
 	catName := sanitizeArchiveCatName(t.Name)
 
 	for len(queue) > 0 && len(visited) < maxDirs {
@@ -547,23 +674,43 @@ func (s *Service) scanCloudCenterTarget(
 					})
 					continue
 				}
-				// Optional empty folder check (only when explicitly enabled by user)
-				if req.EnableEmptyDir && !isManagedCloudSkipDir(f, p115Cfg) && !activeCIDs[f.FID] {
+				// Optional empty folder / single-child flatten probe
+				if (req.EnableEmptyDir || req.EnableFlatten) && !isManagedCloudSkipDir(f, p115Cfg) && !activeCIDs[f.FID] {
 					sub, subErr := cloud.Files(ctx, f.FID, 0)
-					if subErr == nil && len(sub.Files) == 0 {
-						out = append(out, OrganizeItem{
-							ID:         makeID(),
-							Tool:       "empty_dir",
-							Scope:      "cloud",
-							TargetName: t.Name,
-							Name:       f.Name,
-							Detail:     "空文件夹",
-							Action:     "delete",
-							DestLabel:  "移入 115 回收站",
-							SourceCID:  cur.cid,
-							FID:        f.FID,
-						})
-						continue
+					if subErr == nil {
+						if req.EnableEmptyDir && len(sub.Files) == 0 {
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "empty_dir",
+								Scope:      "cloud",
+								TargetName: t.Name,
+								Name:       f.Name,
+								Detail:     "空文件夹",
+								Action:     "delete",
+								DestLabel:  "移入 115 回收站",
+								SourceCID:  cur.cid,
+								FID:        f.FID,
+							})
+							continue
+						}
+						if req.EnableFlatten && len(sub.Files) == 1 && sub.NextOffset == nil && !strictDateDirRe.MatchString(f.Name) {
+							child := sub.Files[0]
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "flatten",
+								Scope:      "cloud",
+								TargetName: t.Name,
+								Name:       f.Name + "/" + child.Name,
+								Detail:     "单子项套娃文件夹",
+								Action:     "flatten",
+								DestLabel:  "提至上层并清壳",
+								SourceCID:  cur.cid,
+								FID:        f.FID,
+								ChildFID:   child.FID,
+								ChildName:  child.Name,
+							})
+							continue
+						}
 					}
 				}
 				if cur.depth < maxSubDepth && !isManagedCloudSkipDir(f, p115Cfg) && !visited[f.FID] {
@@ -572,84 +719,124 @@ func (s *Service) scanCloudCenterTarget(
 				continue
 			}
 
-			// File checks: Duplicate (SHA1), Junk, Classify
-			isDup := false
-			if req.EnableDuplicate && f.SHA1 != "" {
-				if first, exists := sha1Seen[f.SHA1]; exists {
-					isDup = true
-					out = append(out, OrganizeItem{
-						ID:         makeID(),
-						Tool:       "duplicate",
-						Scope:      "cloud",
-						TargetName: t.Name,
-						Name:       f.Name,
-						Size:       f.Size,
-						Detail:     "与「" + first + "」SHA1 完全一致",
-						Action:     "delete",
-						DestLabel:  "移入 115 回收站",
-						SourceCID:  cur.cid,
-						FID:        f.FID,
-					})
-				} else {
-					sha1Seen[f.SHA1] = f.Name
-				}
-			}
+			allFiles = append(allFiles, cloudFileRec{f: f, curCID: cur.cid, depth: cur.depth})
+		}
+	}
 
-			isJunk := false
-			if !isDup && req.EnableJunk {
-				ext := strings.ToLower(filepath.Ext(f.Name))
-				if junkExts[ext] {
-					isJunk = true
-					out = append(out, OrganizeItem{
-						ID:         makeID(),
-						Tool:       "junk",
-						Scope:      "cloud",
-						TargetName: t.Name,
-						Name:       f.Name,
-						Size:       f.Size,
-						Detail:     "命中垃圾扩展名 " + ext,
-						Action:     "delete",
-						DestLabel:  "移入 115 回收站",
-						SourceCID:  cur.cid,
-						FID:        f.FID,
-					})
-				} else if junkMaxBytes > 0 && f.Size > 0 && f.Size < junkMaxBytes {
-					isJunk = true
-					out = append(out, OrganizeItem{
-						ID:         makeID(),
-						Tool:       "junk",
-						Scope:      "cloud",
-						TargetName: t.Name,
-						Name:       f.Name,
-						Size:       f.Size,
-						Detail:     fmt.Sprintf("小于 %.1f MB", req.JunkMaxMB),
-						Action:     "delete",
-						DestLabel:  "移入 115 回收站",
-						SourceCID:  cur.cid,
-						FID:        f.FID,
-					})
-				}
+	// 2. SHA1 Duplicate grouping with configurable keep policy
+	dupFIDs := make(map[string]bool)
+	if req.EnableDuplicate {
+		groups := make(map[string][]cloudFileRec)
+		var order []string
+		for _, rec := range allFiles {
+			if rec.f.SHA1 == "" {
+				continue
 			}
-
-			// Classify scattered top-level files only (avoids breaking nested folder structures)
-			if !isDup && !isJunk && req.EnableClassify && cur.depth == 0 {
-				subDir := classifyFolderName(f.Name, f.ModTime, req.ClassifyMode, s.loc)
+			if _, ok := groups[rec.f.SHA1]; !ok {
+				order = append(order, rec.f.SHA1)
+			}
+			groups[rec.f.SHA1] = append(groups[rec.f.SHA1], rec)
+		}
+		for _, sha := range order {
+			grp := groups[sha]
+			if len(grp) < 2 {
+				continue
+			}
+			names := make([]string, len(grp))
+			mods := make([]int64, len(grp))
+			for i, rec := range grp {
+				names[i] = rec.f.Name
+				mods[i] = rec.f.ModTime
+			}
+			keepIdx := pickDupKeeperIndex(names, mods, wbCfg.DedupKeepPolicy)
+			keepName := grp[keepIdx].f.Name
+			for i, rec := range grp {
+				if i == keepIdx {
+					continue
+				}
+				dupFIDs[rec.f.FID] = true
 				out = append(out, OrganizeItem{
 					ID:         makeID(),
-					Tool:       "classify",
+					Tool:       "duplicate",
+					Scope:      "cloud",
+					TargetName: t.Name,
+					Name:       rec.f.Name,
+					SHA1:       rec.f.SHA1,
+					Size:       rec.f.Size,
+					Detail:     "保留「" + keepName + "」",
+					Action:     "delete",
+					DestLabel:  "移入 115 回收站",
+					SourceCID:  rec.curCID,
+					FID:        rec.f.FID,
+				})
+			}
+		}
+	}
+
+	// 3. Junk, Rename, and Classify on non-duplicate files
+	for _, rec := range allFiles {
+		if dupFIDs[rec.f.FID] {
+			continue
+		}
+		f := rec.f
+		isJunk := false
+		if req.EnableJunk {
+			if hit, reason := evalJunkFile(f.Name, f.SHA1, f.Size, junkExts, safeExts, sha1BL, keywords, kwMaxBytes, junkMaxBytes, wbCfg.JunkMaxMB, wbCfg.JunkKeywordMaxMB); hit {
+				isJunk = true
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "junk",
 					Scope:      "cloud",
 					TargetName: t.Name,
 					Name:       f.Name,
+					SHA1:       f.SHA1,
 					Size:       f.Size,
-					Detail:     "归类到子目录「" + subDir + "」",
-					Action:     "move",
-					DestLabel:  t.Name + "/" + subDir,
-					SourceCID:  cur.cid,
-					RootCID:    t.CID,
+					Detail:     reason,
+					Action:     "delete",
+					DestLabel:  "移入 115 回收站",
+					SourceCID:  rec.curCID,
 					FID:        f.FID,
-					DestSubdir: subDir,
 				})
 			}
+		}
+		if isJunk {
+			continue
+		}
+		if req.EnableRename {
+			if nn, reason := cleanFilename(f.Name, wbCfg); nn != f.Name {
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "rename",
+					Scope:      "cloud",
+					TargetName: t.Name,
+					Name:       f.Name,
+					NewName:    nn,
+					Size:       f.Size,
+					Detail:     reason,
+					Action:     "rename",
+					DestLabel:  "→ " + nn,
+					SourceCID:  rec.curCID,
+					FID:        f.FID,
+				})
+			}
+		}
+		if req.EnableClassify && rec.depth == 0 {
+			subDir := classifyFolderName(f.Name, f.ModTime, wbCfg.ClassifyMode, s.loc)
+			out = append(out, OrganizeItem{
+				ID:         makeID(),
+				Tool:       "classify",
+				Scope:      "cloud",
+				TargetName: t.Name,
+				Name:       f.Name,
+				Size:       f.Size,
+				Detail:     "归类到「" + subDir + "」",
+				Action:     "move",
+				DestLabel:  t.Name + "/" + subDir,
+				SourceCID:  rec.curCID,
+				RootCID:    t.CID,
+				FID:        f.FID,
+				DestSubdir: subDir,
+			})
 		}
 	}
 	return out
@@ -659,10 +846,9 @@ func (s *Service) scanLocalCenterTarget(
 	ctx context.Context,
 	t resolvedCenterTarget,
 	req CenterScanRequest,
+	wbCfg WorkbenchConfig,
 	todayStr string,
 	activeDates map[string]bool,
-	junkExts map[string]bool,
-	junkMaxBytes int64,
 	makeID func() string,
 ) []OrganizeItem {
 	type dirNode struct {
@@ -674,15 +860,27 @@ func (s *Service) scanLocalCenterTarget(
 	visited := make(map[string]bool)
 	const maxDirs = 100
 
-	var out []OrganizeItem
-	sizeBuckets := make(map[int64][]string) // size -> paths for lazy SHA1 only on size collisions
-	type fileEntry struct {
-		path string
-		name string
-		size int64
-		mod  int64
+	junkExts := parseExtSet(wbCfg.JunkExts)
+	safeExts := parseExtSet(wbCfg.JunkSafeExts)
+	sha1BL := make(map[string]bool, len(wbCfg.JunkSHA1Blacklist))
+	for _, h := range wbCfg.JunkSHA1Blacklist {
+		sha1BL[strings.ToLower(h)] = true
 	}
-	var dupCandidates []fileEntry
+	keywords := parseKeywords(wbCfg.JunkKeywords)
+	kwMaxBytes := int64(wbCfg.JunkKeywordMaxMB * 1024 * 1024)
+	junkMaxBytes := int64(wbCfg.JunkMaxMB * 1024 * 1024)
+
+	var out []OrganizeItem
+	sizeBuckets := make(map[int64][]string)
+	type fileEntry struct {
+		path  string
+		dir   string
+		name  string
+		size  int64
+		mod   int64
+		depth int
+	}
+	var allFiles []fileEntry
 	catName := sanitizeArchiveCatName(t.Name)
 
 	for len(queue) > 0 && len(visited) < maxDirs {
@@ -744,20 +942,40 @@ func (s *Service) scanLocalCenterTarget(
 					})
 					continue
 				}
-				if req.EnableEmptyDir {
-					if children, rErr := os.ReadDir(full); rErr == nil && len(children) == 0 {
-						out = append(out, OrganizeItem{
-							ID:         makeID(),
-							Tool:       "empty_dir",
-							Scope:      "local",
-							TargetName: t.Name,
-							Name:       e.Name(),
-							Detail:     "空文件夹",
-							Action:     "delete",
-							DestLabel:  "删除空目录",
-							SourcePath: full,
-						})
-						continue
+				if req.EnableEmptyDir || req.EnableFlatten {
+					if children, rErr := os.ReadDir(full); rErr == nil {
+						if req.EnableEmptyDir && len(children) == 0 {
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "empty_dir",
+								Scope:      "local",
+								TargetName: t.Name,
+								Name:       e.Name(),
+								Detail:     "空文件夹",
+								Action:     "delete",
+								DestLabel:  "删除空目录",
+								SourcePath: full,
+							})
+							continue
+						}
+						if req.EnableFlatten && len(children) == 1 && !strictDateDirRe.MatchString(e.Name()) {
+							ch := children[0]
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "flatten",
+								Scope:      "local",
+								TargetName: t.Name,
+								Name:       e.Name() + "/" + ch.Name(),
+								Detail:     "单子项套娃文件夹",
+								Action:     "flatten",
+								DestLabel:  "提至上层并清壳",
+								SourcePath: full,
+								RootPath:   cur.path,
+								ChildPath:  filepath.Join(full, ch.Name()),
+								ChildName:  ch.Name(),
+							})
+							continue
+						}
 					}
 				}
 				if cur.depth < maxSubDepth && !visited[full] {
@@ -772,70 +990,18 @@ func (s *Service) scanLocalCenterTarget(
 			}
 			size := info.Size()
 			mod := info.ModTime().Unix()
-
-			if req.EnableDuplicate && size > 0 {
+			if size > 0 {
 				sizeBuckets[size] = append(sizeBuckets[size], full)
-				dupCandidates = append(dupCandidates, fileEntry{path: full, name: e.Name(), size: size, mod: mod})
 			}
-
-			isJunk := false
-			if req.EnableJunk {
-				ext := strings.ToLower(filepath.Ext(e.Name()))
-				if junkExts[ext] {
-					isJunk = true
-					out = append(out, OrganizeItem{
-						ID:         makeID(),
-						Tool:       "junk",
-						Scope:      "local",
-						TargetName: t.Name,
-						Name:       e.Name(),
-						Size:       size,
-						Detail:     "命中垃圾扩展名 " + ext,
-						Action:     "delete",
-						DestLabel:  "删除文件",
-						SourcePath: full,
-					})
-				} else if junkMaxBytes > 0 && size > 0 && size < junkMaxBytes {
-					isJunk = true
-					out = append(out, OrganizeItem{
-						ID:         makeID(),
-						Tool:       "junk",
-						Scope:      "local",
-						TargetName: t.Name,
-						Name:       e.Name(),
-						Size:       size,
-						Detail:     fmt.Sprintf("小于 %.1f MB", req.JunkMaxMB),
-						Action:     "delete",
-						DestLabel:  "删除文件",
-						SourcePath: full,
-					})
-				}
-			}
-
-			if !isJunk && req.EnableClassify && cur.depth == 0 {
-				subDir := classifyFolderName(e.Name(), mod, req.ClassifyMode, s.loc)
-				out = append(out, OrganizeItem{
-					ID:         makeID(),
-					Tool:       "classify",
-					Scope:      "local",
-					TargetName: t.Name,
-					Name:       e.Name(),
-					Size:       size,
-					Detail:     "归类到子目录「" + subDir + "」",
-					Action:     "move",
-					DestLabel:  t.Name + "/" + subDir,
-					SourcePath: full,
-					RootPath:   t.Path,
-					DestSubdir: subDir,
-				})
-			}
+			allFiles = append(allFiles, fileEntry{path: full, dir: cur.path, name: e.Name(), size: size, mod: mod, depth: cur.depth})
 		}
 	}
 
-	// Only hash local files that actually share an identical size (fast & low I/O).
-	if req.EnableDuplicate && len(dupCandidates) > 1 {
-		hashSeen := make(map[string]string)
-		for _, fc := range dupCandidates {
+	dupPaths := make(map[string]bool)
+	if req.EnableDuplicate && len(allFiles) > 1 {
+		groups := make(map[string][]fileEntry)
+		var order []string
+		for _, fc := range allFiles {
 			if len(sizeBuckets[fc.size]) < 2 {
 				continue
 			}
@@ -843,22 +1009,110 @@ func (s *Service) scanLocalCenterTarget(
 			if err != nil {
 				continue
 			}
-			if first, exists := hashSeen[h]; exists {
+			if _, ok := groups[h]; !ok {
+				order = append(order, h)
+			}
+			groups[h] = append(groups[h], fc)
+		}
+		for _, sha := range order {
+			grp := groups[sha]
+			if len(grp) < 2 {
+				continue
+			}
+			names := make([]string, len(grp))
+			mods := make([]int64, len(grp))
+			for i, fc := range grp {
+				names[i] = fc.name
+				mods[i] = fc.mod
+			}
+			keepIdx := pickDupKeeperIndex(names, mods, wbCfg.DedupKeepPolicy)
+			keepName := grp[keepIdx].name
+			for i, fc := range grp {
+				if i == keepIdx {
+					continue
+				}
+				dupPaths[fc.path] = true
 				out = append(out, OrganizeItem{
 					ID:         makeID(),
 					Tool:       "duplicate",
 					Scope:      "local",
 					TargetName: t.Name,
 					Name:       fc.name,
+					SHA1:       sha,
 					Size:       fc.size,
-					Detail:     "与「" + first + "」SHA1 完全一致",
+					Detail:     "保留「" + keepName + "」",
 					Action:     "delete",
 					DestLabel:  "删除重复副本",
 					SourcePath: fc.path,
 				})
-			} else {
-				hashSeen[h] = fc.name
 			}
+		}
+	}
+
+	for _, fc := range allFiles {
+		if dupPaths[fc.path] {
+			continue
+		}
+		isJunk := false
+		if req.EnableJunk {
+			var sha string
+			if len(sha1BL) > 0 && fc.size > 0 && fc.size <= 50*1024*1024 {
+				sha, _ = hashFileSHA1(fc.path)
+			}
+			if hit, reason := evalJunkFile(fc.name, sha, fc.size, junkExts, safeExts, sha1BL, keywords, kwMaxBytes, junkMaxBytes, wbCfg.JunkMaxMB, wbCfg.JunkKeywordMaxMB); hit {
+				isJunk = true
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "junk",
+					Scope:      "local",
+					TargetName: t.Name,
+					Name:       fc.name,
+					SHA1:       sha,
+					Size:       fc.size,
+					Detail:     reason,
+					Action:     "delete",
+					DestLabel:  "删除文件",
+					SourcePath: fc.path,
+				})
+			}
+		}
+		if isJunk {
+			continue
+		}
+		if req.EnableRename {
+			if nn, reason := cleanFilename(fc.name, wbCfg); nn != fc.name {
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "rename",
+					Scope:      "local",
+					TargetName: t.Name,
+					Name:       fc.name,
+					NewName:    nn,
+					Size:       fc.size,
+					Detail:     reason,
+					Action:     "rename",
+					DestLabel:  "→ " + nn,
+					SourcePath: fc.path,
+					RootPath:   fc.dir,
+				})
+			}
+		}
+		if req.EnableClassify && fc.depth == 0 {
+			subDir := classifyFolderName(fc.name, fc.mod, wbCfg.ClassifyMode, s.loc)
+			out = append(out, OrganizeItem{
+				ID:         makeID(),
+				Tool:       "classify",
+				Scope:      "local",
+				TargetName: t.Name,
+				Name:       fc.name,
+				Size:       fc.size,
+				Detail:     "归类到「" + subDir + "」",
+				Action:     "move",
+				DestLabel:  t.Name + "/" + subDir,
+				SourcePath: fc.path,
+				RootPath:   t.Path,
+				DestSubdir: subDir,
+			})
 		}
 	}
 	return out
@@ -916,13 +1170,18 @@ func (s *Service) StartCenterExec(itemIDs []string) (string, error) {
 func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected []OrganizeItem) {
 	res := &CenterExecResult{}
 	completedIDs := make(map[string]bool)
+	var undoBatch []RenameUndoEntry
 
 	defer func() {
 		s.center.mu.Lock()
+		if len(undoBatch) > 0 {
+			s.center.lastRenames = undoBatch
+			s.center.state.UndoRenameCount = len(undoBatch)
+		}
 		// Remove completed items from cached plan so UI stays accurate.
 		if s.center.state.Plan != nil && len(completedIDs) > 0 {
 			rem := make([]OrganizeItem, 0, len(s.center.state.Plan.Items))
-			counts := map[string]int{"date_archive": 0, "duplicate": 0, "junk": 0, "classify": 0, "empty_dir": 0}
+			counts := map[string]int{"date_archive": 0, "duplicate": 0, "junk": 0, "classify": 0, "empty_dir": 0, "rename": 0, "flatten": 0}
 			for _, it := range s.center.state.Plan.Items {
 				if completedIDs[it.ID] {
 					continue
@@ -941,17 +1200,17 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				s.center.addLogLocked("执行已中止。")
 			} else {
 				s.center.state.Status = "done"
-				s.center.state.StageLabel = fmt.Sprintf("执行完成：移动 %d 项 · 清理 %d 项 · 失败 %d 项",
-					res.MovedCount, res.DeletedCount, res.FailedCount)
+				s.center.state.StageLabel = fmt.Sprintf("执行完成：移动 %d · 改名 %d · 清理 %d · 失败 %d",
+					res.MovedCount, res.RenamedCount, res.DeletedCount, res.FailedCount)
 			}
 		}
 		s.center.cancel = nil
 		s.center.state.FinishedAt = time.Now().Unix()
 		s.center.mu.Unlock()
 
-		if res.MovedCount > 0 || res.DeletedCount > 0 {
-			msg := fmt.Sprintf("目录整理中心执行完成：移动 %d 项，清理 %d 项（失败 %d 项）",
-				res.MovedCount, res.DeletedCount, res.FailedCount)
+		if res.MovedCount > 0 || res.DeletedCount > 0 || res.RenamedCount > 0 {
+			msg := fmt.Sprintf("移动 %d 项，改名 %d 项，清理 %d 项（失败 %d 项）",
+				res.MovedCount, res.RenamedCount, res.DeletedCount, res.FailedCount)
 			_ = s.store.RecordEvent(context.Background(), "system", "DATE_ORGANIZED", "organize", msg, true)
 		}
 	}()
@@ -969,7 +1228,8 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		}
 		doneCount++
 		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("处理本地：%s（%d/%d）", it.Name, doneCount, len(selected)))
-		if it.Action == "delete" {
+		switch it.Action {
+		case "delete":
 			if err := os.Remove(it.SourcePath); err != nil {
 				res.FailedCount++
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
@@ -979,54 +1239,142 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				completedIDs[it.ID] = true
 				s.center.addLog("已清理本地：" + it.Name)
 			}
-			continue
-		}
-		var destParent string
-		if it.Tool == "date_archive" {
-			cat := sanitizeArchiveCatName(it.TargetName)
-			yearDir, monthDir, _ := historyTargetRel(cat, it.DateStr)
-			destParent = filepath.Join(s.historyDir(), cat, yearDir, monthDir)
-		} else {
-			destParent = filepath.Join(it.RootPath, it.DestSubdir)
-		}
-		if err := os.MkdirAll(destParent, 0o755); err != nil {
-			res.FailedCount++
-			res.Errors = append(res.Errors, it.Name+": "+err.Error())
-			continue
-		}
-		destPath := uniqueDestPath(filepath.Join(destParent, filepath.Base(it.SourcePath)))
-		if err := os.Rename(it.SourcePath, destPath); err != nil {
-			res.FailedCount++
-			res.Errors = append(res.Errors, it.Name+": "+err.Error())
-			s.center.addLog("本地移动失败：" + it.Name + "（" + err.Error() + "）")
-		} else {
-			res.MovedCount++
-			completedIDs[it.ID] = true
-			s.center.addLog("已移动本地：" + it.Name + " → " + it.DestLabel)
+		case "rename":
+			destPath := filepath.Join(it.RootPath, it.NewName)
+			if _, statErr := os.Stat(destPath); statErr == nil {
+				res.FailedCount++
+				res.Errors = append(res.Errors, it.Name+": 目标文件名已存在")
+				s.center.addLog("本地改名跳过（重名）：" + it.Name)
+				continue
+			}
+			if err := os.Rename(it.SourcePath, destPath); err != nil {
+				res.FailedCount++
+				res.Errors = append(res.Errors, it.Name+": "+err.Error())
+				s.center.addLog("本地改名失败：" + it.Name + "（" + err.Error() + "）")
+			} else {
+				res.RenamedCount++
+				completedIDs[it.ID] = true
+				undoBatch = append(undoBatch, RenameUndoEntry{
+					Scope: "local", LocalDir: it.RootPath, OldName: it.Name, NewName: it.NewName,
+				})
+				s.center.addLog("已改名本地：" + it.Name + " → " + it.NewName)
+			}
+		case "flatten":
+			destPath := uniqueDestPath(filepath.Join(it.RootPath, it.ChildName))
+			if err := os.Rename(it.ChildPath, destPath); err != nil {
+				res.FailedCount++
+				res.Errors = append(res.Errors, it.Name+": "+err.Error())
+				s.center.addLog("本地解包失败：" + it.Name + "（" + err.Error() + "）")
+			} else {
+				_ = os.Remove(it.SourcePath)
+				res.MovedCount++
+				completedIDs[it.ID] = true
+				s.center.addLog("已解包本地：" + it.Name)
+			}
+		default: // move
+			var destParent string
+			if it.Tool == "date_archive" {
+				cat := sanitizeArchiveCatName(it.TargetName)
+				yearDir, monthDir, _ := historyTargetRel(cat, it.DateStr)
+				destParent = filepath.Join(s.historyDir(), cat, yearDir, monthDir)
+			} else {
+				destParent = filepath.Join(it.RootPath, it.DestSubdir)
+			}
+			if err := os.MkdirAll(destParent, 0o755); err != nil {
+				res.FailedCount++
+				res.Errors = append(res.Errors, it.Name+": "+err.Error())
+				continue
+			}
+			destPath := uniqueDestPath(filepath.Join(destParent, filepath.Base(it.SourcePath)))
+			if err := os.Rename(it.SourcePath, destPath); err != nil {
+				res.FailedCount++
+				res.Errors = append(res.Errors, it.Name+": "+err.Error())
+				s.center.addLog("本地移动失败：" + it.Name + "（" + err.Error() + "）")
+			} else {
+				res.MovedCount++
+				completedIDs[it.ID] = true
+				s.center.addLog("已移动本地：" + it.Name + " → " + it.DestLabel)
+			}
 		}
 	}
 
-	// 2. Group cloud deletes by SourceCID and execute via BatchDelete (up to 50 per request!).
+	// 2. Partition cloud items into delete / rename / flatten / move batches.
 	cloudDelGroups := make(map[string][]OrganizeItem)
+	cloudRenGroups := make(map[string][]OrganizeItem)
+	var cloudFlattens []OrganizeItem
 	var cloudMoves []OrganizeItem
 	for _, it := range selected {
 		if it.Scope != "cloud" {
 			continue
 		}
-		if it.Action == "delete" {
+		switch it.Action {
+		case "delete":
 			cloudDelGroups[it.SourceCID] = append(cloudDelGroups[it.SourceCID], it)
-		} else {
+		case "rename":
+			cloudRenGroups[it.SourceCID] = append(cloudRenGroups[it.SourceCID], it)
+		case "flatten":
+			cloudFlattens = append(cloudFlattens, it)
+		default:
 			cloudMoves = append(cloudMoves, it)
 		}
 	}
 
-	if cloud == nil && (len(cloudDelGroups) > 0 || len(cloudMoves) > 0) {
+	if cloud == nil && (len(cloudDelGroups) > 0 || len(cloudRenGroups) > 0 || len(cloudFlattens) > 0 || len(cloudMoves) > 0) {
 		s.center.addLog("跳过 115 云端项：尚未配置 115 Cookie。")
-		res.SkippedCount += len(cloudMoves)
+		res.SkippedCount += len(cloudMoves) + len(cloudFlattens)
 		for _, g := range cloudDelGroups {
 			res.SkippedCount += len(g)
 		}
+		for _, g := range cloudRenGroups {
+			res.SkippedCount += len(g)
+		}
 		return
+	}
+
+	// 2a. BatchRename (up to 50 per request!)
+	for srcCID, grp := range cloudRenGroups {
+		if ctx.Err() != nil {
+			return
+		}
+		rmap := make(map[string]string, len(grp))
+		for _, it := range grp {
+			rmap[it.FID] = it.NewName
+		}
+		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("115 批量改名（%d 项）…", len(rmap)))
+		if err := cloud.BatchRename(ctx, srcCID, rmap); err != nil {
+			res.FailedCount += len(grp)
+			res.Errors = append(res.Errors, "批量改名失败: "+err.Error())
+			s.center.addLog(fmt.Sprintf("115 批量改名 %d 项失败：%s", len(rmap), err.Error()))
+		} else {
+			res.RenamedCount += len(grp)
+			for _, it := range grp {
+				completedIDs[it.ID] = true
+				undoBatch = append(undoBatch, RenameUndoEntry{
+					Scope: "cloud", SourceCID: srcCID, FID: it.FID, OldName: it.Name, NewName: it.NewName,
+				})
+			}
+			s.center.addLog(fmt.Sprintf("115 批量改名成功：%d 项（可一键撤销）", len(rmap)))
+		}
+		doneCount += len(grp)
+	}
+
+	// 2b. Flatten single-child cloud folders (move child up + recycle wrapper)
+	for _, it := range cloudFlattens {
+		if ctx.Err() != nil {
+			return
+		}
+		s.center.setProgress(doneCount, len(selected), "解包套娃："+it.Name)
+		if err := cloud.BatchMove(ctx, it.FID, []string{it.ChildFID}, it.SourceCID); err != nil {
+			res.FailedCount++
+			res.Errors = append(res.Errors, it.Name+": "+err.Error())
+			s.center.addLog("115 解包失败：" + it.Name + "（" + err.Error() + "）")
+		} else {
+			_ = cloud.BatchDelete(ctx, it.SourceCID, []string{it.FID})
+			res.MovedCount++
+			completedIDs[it.ID] = true
+			s.center.addLog("115 解包成功：" + it.Name)
+		}
+		doneCount++
 	}
 
 	for srcCID, grp := range cloudDelGroups {

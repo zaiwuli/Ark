@@ -102,6 +102,7 @@ type Port interface {
 	DeleteVerified(ctx context.Context, loc FileLocator) error
 	BatchMove(ctx context.Context, sourceCID string, fids []string, targetCID string) error
 	BatchDelete(ctx context.Context, sourceCID string, fids []string) error
+	BatchRename(ctx context.Context, sourceCID string, renames map[string]string) error
 	SubmitOffline(ctx context.Context, links []string, targetCID string) error
 	OfflineSnapshot(ctx context.Context) ([]OfflineTask, error)
 	PrepareExtract(ctx context.Context, pickcode, secret string) (string, error)
@@ -722,6 +723,49 @@ func (c *Client) BatchDelete(ctx context.Context, sourceCID string, fids []strin
 		var lastErr error
 		for attempt := 0; attempt < 4; attempt++ {
 			_, lastErr = c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/rb/delete", form, true)
+			if lastErr == nil {
+				break
+			}
+			var aErr *AdapterError
+			if !errors.As(lastErr, &aErr) || aErr.RemoteCode != "990009" {
+				return lastErr
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(4 * time.Second):
+			}
+		}
+		if lastErr != nil {
+			return lastErr
+		}
+	}
+	c.InvalidateDirCache(sourceCID)
+	return nil
+}
+
+// BatchRename renames up to 50 files/folders per HTTP request via /files/batch_rename.
+func (c *Client) BatchRename(ctx context.Context, sourceCID string, renames map[string]string) error {
+	if len(renames) == 0 {
+		return nil
+	}
+	fids := make([]string, 0, len(renames))
+	for fid := range renames {
+		fids = append(fids, fid)
+	}
+	const chunkSize = 50
+	for i := 0; i < len(fids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(fids) {
+			end = len(fids)
+		}
+		form := url.Values{}
+		for _, fid := range fids[i:end] {
+			form.Set(fmt.Sprintf("files_new_name[%s]", fid), renames[fid])
+		}
+		var lastErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			_, lastErr = c.doJSON(ctx, http.MethodPost, c.webAPIBase+"/files/batch_rename", form, true)
 			if lastErr == nil {
 				break
 			}
