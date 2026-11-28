@@ -594,7 +594,7 @@ func (s *Service) scanCloudCenterTarget(
 	maxSubDepth := t.Depth - 1
 	queue := []dirNode{{cid: t.CID, depth: 0}}
 	visited := make(map[string]bool)
-	const maxCloudDirCalls = 60
+	const maxCloudDirCalls = 200
 	apiCalls := 0
 	budgetWarned := false
 
@@ -614,8 +614,68 @@ func (s *Service) scanCloudCenterTarget(
 		depth  int
 	}
 	var allFiles []cloudFileRec
+	seenFileFID := make(map[string]bool)
+	addFileRec := func(f p115.CloudFile, curCID string, depth int) {
+		if f.IsDir || f.FID == "" || seenFileFID[f.FID] {
+			return
+		}
+		seenFileFID[f.FID] = true
+		allFiles = append(allFiles, cloudFileRec{f: f, curCID: curCID, depth: depth})
+	}
+	skipCIDs := make(map[string]bool, len(activeCIDs)+4)
+	for cid := range activeCIDs {
+		skipCIDs[cid] = true
+	}
+	for _, managed := range []string{p115Cfg.CloudArchiveZoneCID, p115Cfg.CloudArchiveCID, p115Cfg.CloudFailedCID, p115Cfg.CloudHistoryCID} {
+		if managed != "" {
+			skipCIDs[managed] = true
+		}
+	}
+	deletedDirCIDs := make(map[string]bool)
+	flattenedCIDs := make(map[string]bool)
+
 	var out []OrganizeItem
 	catName := sanitizeArchiveCatName(t.Name)
+
+	// Phase 0: Fast flat recursive file fetch (show_dir=0, cur=0, limit=1150) — pulls ALL files across ALL depths in seconds!
+	recursiveUsed := false
+	wantFileTools := req.EnableJunk || req.EnableDuplicate || req.EnableRename
+	if t.Depth >= 2 && wantFileTools && t.CID != "" && t.CID != "0" && t.CID != p115Cfg.CloudRootCID {
+		const maxRecPages = 15
+		offset := 0
+		recOK := true
+		for pageIdx := 0; pageIdx < maxRecPages; pageIdx++ {
+			if ctx.Err() != nil {
+				return out
+			}
+			page, err := cloud.FilesRecursive(ctx, t.CID, offset)
+			if err != nil {
+				if isCloudScanFatalErr(err) {
+					s.center.addLog("检测到 115 熔断/限流/认证异常，已停止扫描。")
+					return out
+				}
+				s.center.addLog(fmt.Sprintf("极速递归拉取回退到逐层扫描（%s）", err.Error()))
+				recOK = false
+				break
+			}
+			for _, f := range page.Files {
+				d := 1
+				if f.CID == t.CID {
+					d = 0
+				}
+				addFileRec(f, f.CID, d)
+			}
+			s.center.setProgress(pageIdx+1, maxRecPages, fmt.Sprintf("极速扫描 [115] %s（已拉取 %d 个文件）…", t.Name, len(allFiles)))
+			if page.NextOffset == nil {
+				break
+			}
+			offset = *page.NextOffset
+		}
+		if recOK {
+			recursiveUsed = true
+			s.center.addLog(fmt.Sprintf("极速递归扫描 [115] %s 完成：共拉取 %d 个全层级文件", t.Name, len(allFiles)))
+		}
+	}
 
 	reportProgress := func() {
 		if apiCalls > 0 && apiCalls%5 == 0 {
@@ -624,14 +684,15 @@ func (s *Service) scanCloudCenterTarget(
 		}
 	}
 
-	for len(queue) > 0 {
+	needDirBFS := req.EnableDateArchive || req.EnableEmptyDir || req.EnableFlatten || req.EnableClassify || (req.EnableJunk && len(keywords) > 0) || !recursiveUsed
+	for needDirBFS && len(queue) > 0 {
 		if ctx.Err() != nil {
 			return out
 		}
 		if apiCalls >= maxCloudDirCalls {
 			if !budgetWarned {
 				budgetWarned = true
-				s.center.addLog(fmt.Sprintf("[115] %s 已达单目标安全上限（%d 次目录请求），为防风控已提前收尾，执行本批后可再次扫描", t.Name, maxCloudDirCalls))
+				s.center.addLog(fmt.Sprintf("[115] %s 目录探测已达单目标上限（%d 次请求），文件级扫描已全部完成，执行本批后可再扫剩余目录", t.Name, maxCloudDirCalls))
 			}
 			break
 		}
@@ -657,6 +718,7 @@ func (s *Service) scanCloudCenterTarget(
 		// Reuse this single BFS directory listing for empty_dir / junk folder / flatten on subfolders (zero extra API calls!).
 		if cur.depth > 0 && !activeCIDs[cur.cid] {
 			if req.EnableEmptyDir && len(files) == 0 {
+				deletedDirCIDs[cur.cid] = true
 				out = append(out, OrganizeItem{
 					ID:         makeID(),
 					Tool:       "empty_dir",
@@ -673,6 +735,7 @@ func (s *Service) scanCloudCenterTarget(
 			}
 			if req.EnableJunk && len(keywords) > 0 && len(files) > 0 {
 				if hit, reason := evalCloudJunkFolder(cur.name, files, keywords, safeExts, kwMaxBytes, wbCfg.JunkKeywordMaxMB); hit {
+					deletedDirCIDs[cur.cid] = true
 					out = append(out, OrganizeItem{
 						ID:         makeID(),
 						Tool:       "junk",
@@ -690,6 +753,7 @@ func (s *Service) scanCloudCenterTarget(
 			}
 			if req.EnableFlatten && len(files) == 1 && !strictDateDirRe.MatchString(cur.name) {
 				child := files[0]
+				flattenedCIDs[cur.cid] = true
 				out = append(out, OrganizeItem{
 					ID:         makeID(),
 					Tool:       "flatten",
@@ -716,6 +780,7 @@ func (s *Service) scanCloudCenterTarget(
 				// 1. Date folder archive (top-level only, yesterday & earlier)
 				if cur.depth == 0 && req.EnableDateArchive && strictDateDirRe.MatchString(f.Name) && f.Name < todayStr {
 					if activeDates[f.Name] || activeCIDs[f.FID] {
+						skipCIDs[f.FID] = true
 						continue
 					}
 					if req.EnableEmptyDir && apiCalls < maxCloudDirCalls {
@@ -723,6 +788,7 @@ func (s *Service) scanCloudCenterTarget(
 						sub, subErr := cloud.Files(ctx, f.FID, 0)
 						reportProgress()
 						if subErr == nil && len(sub.Files) == 0 {
+							deletedDirCIDs[f.FID] = true
 							out = append(out, OrganizeItem{
 								ID:         makeID(),
 								Tool:       "empty_dir",
@@ -756,9 +822,10 @@ func (s *Service) scanCloudCenterTarget(
 					continue
 				}
 				if isManagedCloudSkipDir(f, p115Cfg) {
+					skipCIDs[f.FID] = true
 					continue
 				}
-				// If within scan depth, enqueue into BFS — empty_dir/flatten will be evaluated for FREE on pop!
+				// If within scan depth, enqueue into BFS — empty_dir/flatten/junkFolder will be evaluated for FREE on pop!
 				if cur.depth < maxSubDepth && !visited[f.FID] {
 					queue = append(queue, dirNode{
 						cid:       f.FID,
@@ -774,7 +841,7 @@ func (s *Service) scanCloudCenterTarget(
 					if apiCalls >= maxCloudDirCalls {
 						if !budgetWarned {
 							budgetWarned = true
-							s.center.addLog(fmt.Sprintf("[115] %s 已达单目标安全上限（%d 次目录请求），为防风控已停止继续探测子目录", t.Name, maxCloudDirCalls))
+							s.center.addLog(fmt.Sprintf("[115] %s 目录探测已达单目标上限（%d 次请求），文件级扫描已完成", t.Name, maxCloudDirCalls))
 						}
 						continue
 					}
@@ -788,7 +855,10 @@ func (s *Service) scanCloudCenterTarget(
 						}
 						continue
 					}
+					matchedFolderOp := false
 					if req.EnableEmptyDir && len(sub.Files) == 0 {
+						matchedFolderOp = true
+						deletedDirCIDs[f.FID] = true
 						out = append(out, OrganizeItem{
 							ID:         makeID(),
 							Tool:       "empty_dir",
@@ -803,6 +873,8 @@ func (s *Service) scanCloudCenterTarget(
 						})
 					} else if kwHitFolder && sub.NextOffset == nil {
 						if hit, reason := evalCloudJunkFolder(f.Name, sub.Files, keywords, safeExts, kwMaxBytes, wbCfg.JunkKeywordMaxMB); hit {
+							matchedFolderOp = true
+							deletedDirCIDs[f.FID] = true
 							out = append(out, OrganizeItem{
 								ID:         makeID(),
 								Tool:       "junk",
@@ -817,6 +889,8 @@ func (s *Service) scanCloudCenterTarget(
 							})
 						}
 					} else if req.EnableFlatten && len(sub.Files) == 1 && sub.NextOffset == nil && !strictDateDirRe.MatchString(f.Name) {
+						matchedFolderOp = true
+						flattenedCIDs[f.FID] = true
 						child := sub.Files[0]
 						out = append(out, OrganizeItem{
 							ID:         makeID(),
@@ -833,12 +907,30 @@ func (s *Service) scanCloudCenterTarget(
 							ChildName:  child.Name,
 						})
 					}
+					// Never waste already-fetched leaf listing: collect its non-dir files for junk/rename/duplicate!
+					if !matchedFolderOp {
+						for _, sf := range sub.Files {
+							addFileRec(sf, f.FID, cur.depth+1)
+						}
+					}
 				}
 				continue
 			}
 
-			allFiles = append(allFiles, cloudFileRec{f: f, curCID: cur.cid, depth: cur.depth})
+			addFileRec(f, cur.cid, cur.depth)
 		}
+	}
+
+	// Exclude files whose parent folder is active/managed, already scheduled for deletion, or being flattened.
+	if len(skipCIDs) > 0 || len(deletedDirCIDs) > 0 || len(flattenedCIDs) > 0 {
+		filtered := allFiles[:0]
+		for _, rec := range allFiles {
+			if skipCIDs[rec.curCID] || deletedDirCIDs[rec.curCID] || flattenedCIDs[rec.curCID] {
+				continue
+			}
+			filtered = append(filtered, rec)
+		}
+		allFiles = filtered
 	}
 
 	// 2. SHA1 Duplicate grouping with configurable keep policy
@@ -1474,9 +1566,9 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		}
 	}
 
-	// 2. Partition cloud items into delete / rename / flatten / move batches.
-	cloudDelGroups := make(map[string][]OrganizeItem)
-	cloudRenGroups := make(map[string][]OrganizeItem)
+	// 2. Partition cloud items into cross-directory global batches (50 per request!).
+	var cloudDeletes []OrganizeItem
+	var cloudRenames []OrganizeItem
 	var cloudFlattens []OrganizeItem
 	var cloudMoves []OrganizeItem
 	for _, it := range selected {
@@ -1485,9 +1577,9 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		}
 		switch it.Action {
 		case "delete":
-			cloudDelGroups[it.SourceCID] = append(cloudDelGroups[it.SourceCID], it)
+			cloudDeletes = append(cloudDeletes, it)
 		case "rename":
-			cloudRenGroups[it.SourceCID] = append(cloudRenGroups[it.SourceCID], it)
+			cloudRenames = append(cloudRenames, it)
 		case "flatten":
 			cloudFlattens = append(cloudFlattens, it)
 		default:
@@ -1495,29 +1587,29 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		}
 	}
 
-	if cloud == nil && (len(cloudDelGroups) > 0 || len(cloudRenGroups) > 0 || len(cloudFlattens) > 0 || len(cloudMoves) > 0) {
+	if cloud == nil && (len(cloudDeletes) > 0 || len(cloudRenames) > 0 || len(cloudFlattens) > 0 || len(cloudMoves) > 0) {
 		s.center.addLog("跳过 115 云端项：尚未配置 115 Cookie。")
-		res.SkippedCount += len(cloudMoves) + len(cloudFlattens)
-		for _, g := range cloudDelGroups {
-			res.SkippedCount += len(g)
-		}
-		for _, g := range cloudRenGroups {
-			res.SkippedCount += len(g)
-		}
+		res.SkippedCount += len(cloudMoves) + len(cloudFlattens) + len(cloudDeletes) + len(cloudRenames)
 		return
 	}
 
-	// 2a. BatchRename (up to 50 per request!)
-	for srcCID, grp := range cloudRenGroups {
+	// 2a. Global cross-directory BatchRename (up to 50 per HTTP request!)
+	const batchChunk = 50
+	for i := 0; i < len(cloudRenames); i += batchChunk {
 		if ctx.Err() != nil {
 			return
 		}
+		end := i + batchChunk
+		if end > len(cloudRenames) {
+			end = len(cloudRenames)
+		}
+		grp := cloudRenames[i:end]
 		rmap := make(map[string]string, len(grp))
 		for _, it := range grp {
 			rmap[it.FID] = it.NewName
 		}
-		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("115 批量改名（%d 项）…", len(rmap)))
-		if err := cloud.BatchRename(ctx, srcCID, rmap); err != nil {
+		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("115 跨目录批量改名（%d/%d）…", end, len(cloudRenames)))
+		if err := cloud.BatchRename(ctx, "", rmap); err != nil {
 			res.FailedCount += len(grp)
 			res.Errors = append(res.Errors, "批量改名失败: "+err.Error())
 			s.center.addLog(fmt.Sprintf("115 批量改名 %d 项失败：%s", len(rmap), err.Error()))
@@ -1526,16 +1618,16 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			for _, it := range grp {
 				completedIDs[it.ID] = true
 				undoBatch = append(undoBatch, RenameUndoEntry{
-					Scope: "cloud", SourceCID: srcCID, FID: it.FID, OldName: it.Name, NewName: it.NewName,
+					Scope: "cloud", SourceCID: it.SourceCID, FID: it.FID, OldName: it.Name, NewName: it.NewName,
 				})
 			}
-			s.center.addLog(fmt.Sprintf("115 批量改名成功：%d 项（可一键撤销）", len(rmap)))
+			s.center.addLog(fmt.Sprintf("115 批量改名成功：%d 项（1 次批处理，可一键撤销）", len(rmap)))
 		}
 		doneCount += len(grp)
 	}
 
-	// 2b. Flatten single-child cloud folders (move child up, then batch-recycle all empty wrappers per parent)
-	flattenShellDeletes := make(map[string][]string)
+	// 2b. Flatten single-child cloud folders (move child up, then global batch-recycle all empty wrappers 50 at a time!)
+	var flattenShells []string
 	for _, it := range cloudFlattens {
 		if ctx.Err() != nil {
 			return
@@ -1546,34 +1638,37 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			res.Errors = append(res.Errors, it.Name+": "+err.Error())
 			s.center.addLog("115 解包失败：" + it.Name + "（" + err.Error() + "）")
 		} else {
-			flattenShellDeletes[it.SourceCID] = append(flattenShellDeletes[it.SourceCID], it.FID)
+			flattenShells = append(flattenShells, it.FID)
 			res.MovedCount++
 			completedIDs[it.ID] = true
 			s.center.addLog("115 解包成功：" + it.Name)
 		}
 		doneCount++
 	}
-	for srcCID, shellFIDs := range flattenShellDeletes {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := cloud.BatchDelete(ctx, srcCID, shellFIDs); err != nil {
-			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳失败：%s", len(shellFIDs), err.Error()))
+	if len(flattenShells) > 0 && ctx.Err() == nil {
+		if err := cloud.BatchDelete(ctx, "", flattenShells); err != nil {
+			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳失败：%s", len(flattenShells), err.Error()))
 		} else {
-			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳完成（1 次批处理）", len(shellFIDs)))
+			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳完成（全局批处理）", len(flattenShells)))
 		}
 	}
 
-	for srcCID, grp := range cloudDelGroups {
+	// 2c. Global cross-directory BatchDelete (up to 50 per HTTP request!)
+	for i := 0; i < len(cloudDeletes); i += batchChunk {
 		if ctx.Err() != nil {
 			return
 		}
+		end := i + batchChunk
+		if end > len(cloudDeletes) {
+			end = len(cloudDeletes)
+		}
+		grp := cloudDeletes[i:end]
 		fids := make([]string, 0, len(grp))
 		for _, it := range grp {
 			fids = append(fids, it.FID)
 		}
-		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("批量移入 115 回收站（%d 项）…", len(fids)))
-		if err := cloud.BatchDelete(ctx, srcCID, fids); err != nil {
+		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("115 跨目录批量清理（%d/%d）…", end, len(cloudDeletes)))
+		if err := cloud.BatchDelete(ctx, "", fids); err != nil {
 			res.FailedCount += len(grp)
 			res.Errors = append(res.Errors, "批量清理失败: "+err.Error())
 			s.center.addLog(fmt.Sprintf("115 批量清理 %d 项失败：%s", len(fids), err.Error()))

@@ -96,6 +96,7 @@ type FileLocator struct {
 // Port defines the narrow boundary between Ark business logic and 115 remote APIs.
 type Port interface {
 	Files(ctx context.Context, cid string, offset int) (FilePage, error)
+	FilesRecursive(ctx context.Context, cid string, offset int) (FilePage, error)
 	DirectoryPath(ctx context.Context, cid string) ([]string, error)
 	EnsureFolder(ctx context.Context, parentCID, name string) (string, error)
 	MoveVerified(ctx context.Context, loc FileLocator, targetCID string) error
@@ -465,7 +466,7 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 	}
 	c.cacheMu.Unlock()
 
-	resp, err := c.fetchFilesJSON(ctx, cid, offset, 115)
+	resp, err := c.fetchFilesJSON(ctx, cid, offset, 1150)
 	if err != nil {
 		return FilePage{}, err
 	}
@@ -536,6 +537,80 @@ func (c *Client) Files(ctx context.Context, cid string, offset int) (FilePage, e
 	c.cacheMu.Unlock()
 
 	return page, nil
+}
+
+// FilesRecursive lists all descendant files under cid across all sub-levels (show_dir=0, cur=0, limit=1150),
+// returning up to 1150 files per HTTP request with each file's true parent directory CID preserved in CloudFile.CID.
+func (c *Client) FilesRecursive(ctx context.Context, cid string, offset int) (FilePage, error) {
+	if err := c.gov.CircuitErr(time.Now()); err != nil {
+		return FilePage{}, err
+	}
+	q := url.Values{
+		"aid":      {"1"},
+		"cid":      {cid},
+		"offset":   {strconv.Itoa(offset)},
+		"show_dir": {"0"},
+		"limit":    {"1150"},
+		"cur":      {"0"},
+		"o":        {"user_ptime"},
+		"asc":      {"0"},
+		"fc_mix":   {"0"},
+		"format":   {"json"},
+	}
+	resp, err := c.doJSON(ctx, http.MethodGet, c.webAPIBase+"/files?"+q.Encode(), nil, false)
+	if err != nil {
+		var aErr *AdapterError
+		if errors.As(err, &aErr) && aErr.RemoteCode == "20130827" {
+			q.Set("natsort", "1")
+			resp, err = c.doJSON(ctx, http.MethodGet, c.natsortBase+"/natsort/files.php?"+q.Encode(), nil, false)
+		}
+		if err != nil {
+			return FilePage{}, err
+		}
+	}
+	if _, err := verifyCIDResponse(resp, cid); err != nil {
+		return FilePage{}, err
+	}
+	rawList, ok := resp["data"].([]any)
+	if !ok {
+		return FilePage{}, &AdapterError{Code: "INVALID_FILE_LIST"}
+	}
+	files := make([]CloudFile, 0, len(rawList))
+	for _, entry := range rawList {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		fid := firstString(m, "fid")
+		if fid == "" {
+			continue // skip any directory entry
+		}
+		parentCID := firstString(m, "cid")
+		if parentCID == "" {
+			parentCID = cid
+		}
+		modTime := asInt64(m["te"])
+		if modTime <= 0 {
+			modTime = asInt64(m["tp"])
+		}
+		files = append(files, CloudFile{
+			FID:      fid,
+			CID:      parentCID,
+			Name:     firstString(m, "n"),
+			Size:     asInt64(m["s"]),
+			Pickcode: firstString(m, "pc"),
+			IsDir:    false,
+			SHA1:     strings.ToLower(firstString(m, "sha", "sha1")),
+			ModTime:  modTime,
+		})
+	}
+	count := int(asInt64(resp["count"]))
+	var nextOffset *int
+	if len(rawList) > 0 && offset+len(rawList) < count {
+		n := offset + len(rawList)
+		nextOffset = &n
+	}
+	return FilePage{Files: files, NextOffset: nextOffset}, nil
 }
 
 func (c *Client) DirectoryPath(ctx context.Context, cid string) ([]string, error) {
@@ -740,7 +815,11 @@ func (c *Client) BatchDelete(ctx context.Context, sourceCID string, fids []strin
 			return lastErr
 		}
 	}
-	c.InvalidateDirCache(sourceCID)
+	if sourceCID == "" {
+		c.InvalidateDirCache()
+	} else {
+		c.InvalidateDirCache(sourceCID)
+	}
 	return nil
 }
 
@@ -783,7 +862,11 @@ func (c *Client) BatchRename(ctx context.Context, sourceCID string, renames map[
 			return lastErr
 		}
 	}
-	c.InvalidateDirCache(sourceCID)
+	if sourceCID == "" {
+		c.InvalidateDirCache()
+	} else {
+		c.InvalidateDirCache(sourceCID)
+	}
 	return nil
 }
 

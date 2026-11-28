@@ -311,7 +311,7 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 		t.Fatalf("expected renamed+classified file at 视频/clip.mp4: %v", err)
 	}
 
-	// 2. Cloud depth=2 BFS: empty_dir + flatten + Option A keyword junk folder (with size guard!)
+	// 2. Cloud depth=2 BFS + FilesRecursive: catches depth-3 junk in one shot, no double-count on deleted/flattened folders!
 	mock := p115.NewMockClient()
 	mock.Listings["bfs_root"] = []p115.CloudFile{
 		{FID: "d_empty", CID: "bfs_root", Name: "空目录", IsDir: true},
@@ -328,7 +328,11 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 	}
 	mock.Listings["d_big_dir"] = []p115.CloudFile{
 		{FID: "f_real_mov", CID: "d_big_dir", Name: "正片.mp4", Size: 200 * 1024 * 1024},
-		{FID: "f_real_mov2", CID: "d_big_dir", Name: "正片2.mp4", Size: 150 * 1024 * 1024},
+		{FID: "d_deep", CID: "d_big_dir", Name: "深层子目录", IsDir: true},
+	}
+	mock.Listings["d_deep"] = []p115.CloudFile{
+		{FID: "f_deep_junk", CID: "d_deep", Name: "最新地址必看.txt", Size: 1024, SHA1: "deepjunksha1"},
+		{FID: "f_deep_vid", CID: "d_deep", Name: "正片2.mp4", Size: 150 * 1024 * 1024},
 	}
 	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "root_cid"})
 	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "深扫测试", Kind: "cloud", Target: "bfs_root", Depth: 2})
@@ -353,8 +357,8 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	// Expect: empty_dir=1 (d_empty), flatten=1 (d_wrap), junk=1 (d_ad_dir ONLY; d_big_dir protected by 20MB size guard!)
-	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 || snap.Plan.Counts["junk"] != 1 {
-		t.Fatalf("unexpected cloud BFS plan: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
+	// Expect: empty_dir=1 (d_empty), flatten=1 (d_wrap), junk=2 (d_ad_dir + depth-3 f_deep_junk; d_big_dir protected, f_ad1 not double-counted!)
+	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 || snap.Plan.Counts["junk"] != 2 {
+		t.Fatalf("unexpected cloud BFS+Recursive plan: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
 	}
 }

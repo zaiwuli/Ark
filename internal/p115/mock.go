@@ -44,6 +44,36 @@ func (m *MockClient) Files(_ context.Context, cid string, offset int) (FilePage,
 	return FilePage{Files: items}, nil
 }
 
+func (m *MockClient) FilesRecursive(_ context.Context, cid string, offset int) (FilePage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if offset > 0 {
+		return FilePage{}, nil
+	}
+	var out []CloudFile
+	queue := []string{cid}
+	seen := map[string]bool{cid: true}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, f := range m.Listings[cur] {
+			if f.IsDir {
+				if f.FID != "" && !seen[f.FID] {
+					seen[f.FID] = true
+					queue = append(queue, f.FID)
+				}
+				continue
+			}
+			cp := f
+			if cp.CID == "" {
+				cp.CID = cur
+			}
+			out = append(out, cp)
+		}
+	}
+	return FilePage{Files: out}, nil
+}
+
 func (m *MockClient) DirectoryPath(_ context.Context, cid string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,7 +160,17 @@ func (m *MockClient) BatchDelete(_ context.Context, sourceCID string, fids []str
 		fidSet[fid] = true
 		m.Deleted = append(m.Deleted, fid)
 	}
-	if list, ok := m.Listings[sourceCID]; ok {
+	if sourceCID == "" {
+		for k, list := range m.Listings {
+			filtered := list[:0]
+			for _, f := range list {
+				if !fidSet[f.FID] {
+					filtered = append(filtered, f)
+				}
+			}
+			m.Listings[k] = filtered
+		}
+	} else if list, ok := m.Listings[sourceCID]; ok {
 		filtered := list[:0]
 		for _, f := range list {
 			if !fidSet[f.FID] {
@@ -148,7 +188,16 @@ func (m *MockClient) BatchRename(_ context.Context, sourceCID string, renames ma
 	for fid, newName := range renames {
 		m.Renamed = append(m.Renamed, fid+"->"+newName)
 	}
-	if list, ok := m.Listings[sourceCID]; ok {
+	if sourceCID == "" {
+		for k, list := range m.Listings {
+			for i := range list {
+				if nn, exists := renames[list[i].FID]; exists {
+					list[i].Name = nn
+				}
+			}
+			m.Listings[k] = list
+		}
+	} else if list, ok := m.Listings[sourceCID]; ok {
 		for i := range list {
 			if nn, exists := renames[list[i].FID]; exists {
 				list[i].Name = nn
