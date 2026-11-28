@@ -235,6 +235,18 @@ func TestWorkbenchRenameUndoKeywordsSHA1BlacklistAndFlatten(t *testing.T) {
 	if svc.CenterJobState().UndoRenameCount != 0 {
 		t.Fatalf("expected UndoRenameCount=0 after undo")
 	}
+	// Auto-blacklist SHA1: deleted f_kw_ad's SHA1 ("sha_kw_ad") must now be persisted!
+	wbAfter := svc.WorkbenchConfig(t.Context())
+	foundAutoBL := false
+	for _, h := range wbAfter.JunkSHA1Blacklist {
+		if h == "sha_kw_ad" {
+			foundAutoBL = true
+			break
+		}
+	}
+	if !foundAutoBL {
+		t.Fatalf("expected deleted junk SHA1 'sha_kw_ad' to be auto-blacklisted, got %v", wbAfter.JunkSHA1Blacklist)
+	}
 }
 
 func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
@@ -299,25 +311,38 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 		t.Fatalf("expected renamed+classified file at 视频/clip.mp4: %v", err)
 	}
 
-	// 2. Cloud depth=2 BFS: empty_dir + flatten evaluated in a single pass with zero duplicate probing
+	// 2. Cloud depth=2 BFS: empty_dir + flatten + Option A keyword junk folder (with size guard!)
 	mock := p115.NewMockClient()
 	mock.Listings["bfs_root"] = []p115.CloudFile{
 		{FID: "d_empty", CID: "bfs_root", Name: "空目录", IsDir: true},
 		{FID: "d_wrap", CID: "bfs_root", Name: "套娃壳", IsDir: true},
+		{FID: "d_ad_dir", CID: "bfs_root", Name: "扫码宣传福利", IsDir: true},
+		{FID: "d_big_dir", CID: "bfs_root", Name: "最新福利电影合集", IsDir: true},
 	}
 	mock.Listings["d_empty"] = []p115.CloudFile{}
 	mock.Listings["d_wrap"] = []p115.CloudFile{
 		{FID: "f_inner", CID: "d_wrap", Name: "movie.mp4", Size: 100 * 1024 * 1024},
+	}
+	mock.Listings["d_ad_dir"] = []p115.CloudFile{
+		{FID: "f_ad1", CID: "d_ad_dir", Name: "二维码.jpg", Size: 500 * 1024},
+	}
+	mock.Listings["d_big_dir"] = []p115.CloudFile{
+		{FID: "f_real_mov", CID: "d_big_dir", Name: "正片.mp4", Size: 200 * 1024 * 1024},
+		{FID: "f_real_mov2", CID: "d_big_dir", Name: "正片2.mp4", Size: 150 * 1024 * 1024},
 	}
 	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "root_cid"})
 	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "深扫测试", Kind: "cloud", Target: "bfs_root", Depth: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	kwMax := 20.0
 	if _, err := svc.StartCenterScan(CenterScanRequest{
-		TargetKeys:     []string{"custom:" + ct.ID},
-		EnableEmptyDir: true,
-		EnableFlatten:  true,
+		TargetKeys:       []string{"custom:" + ct.ID},
+		EnableEmptyDir:   true,
+		EnableFlatten:    true,
+		EnableJunk:       true,
+		JunkKeywords:     "福利,宣传",
+		JunkKeywordMaxMB: &kwMax,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +353,8 @@ func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 {
-		t.Fatalf("unexpected cloud BFS plan: %+v", snap.Plan)
+	// Expect: empty_dir=1 (d_empty), flatten=1 (d_wrap), junk=1 (d_ad_dir ONLY; d_big_dir protected by 20MB size guard!)
+	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 || snap.Plan.Counts["junk"] != 1 {
+		t.Fatalf("unexpected cloud BFS plan: %+v items=%+v", snap.Plan.Counts, snap.Plan.Items)
 	}
 }

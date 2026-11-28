@@ -654,7 +654,7 @@ func (s *Service) scanCloudCenterTarget(
 		}
 		reportProgress()
 
-		// Reuse this single BFS directory listing for empty_dir / flatten on subfolders (zero extra API calls!).
+		// Reuse this single BFS directory listing for empty_dir / junk folder / flatten on subfolders (zero extra API calls!).
 		if cur.depth > 0 && !activeCIDs[cur.cid] {
 			if req.EnableEmptyDir && len(files) == 0 {
 				out = append(out, OrganizeItem{
@@ -670,6 +670,23 @@ func (s *Service) scanCloudCenterTarget(
 					FID:        cur.cid,
 				})
 				continue
+			}
+			if req.EnableJunk && len(keywords) > 0 && len(files) > 0 {
+				if hit, reason := evalCloudJunkFolder(cur.name, files, keywords, safeExts, kwMaxBytes, wbCfg.JunkKeywordMaxMB); hit {
+					out = append(out, OrganizeItem{
+						ID:         makeID(),
+						Tool:       "junk",
+						Scope:      "cloud",
+						TargetName: t.Name,
+						Name:       cur.name,
+						Detail:     reason,
+						Action:     "delete",
+						DestLabel:  "移入 115 回收站",
+						SourceCID:  cur.parentCID,
+						FID:        cur.cid,
+					})
+					continue
+				}
 			}
 			if req.EnableFlatten && len(files) == 1 && !strictDateDirRe.MatchString(cur.name) {
 				child := files[0]
@@ -751,8 +768,9 @@ func (s *Service) scanCloudCenterTarget(
 					})
 					continue
 				}
-				// Leaf directory (at maxSubDepth): only probe if empty_dir/flatten is enabled and budget remains.
-				if (req.EnableEmptyDir || req.EnableFlatten) && !activeCIDs[f.FID] {
+				// Leaf directory (at maxSubDepth): probe for empty_dir/flatten, or for junk ONLY when folder name matches a keyword.
+				kwHitFolder := req.EnableJunk && len(keywords) > 0 && !strictDateDirRe.MatchString(f.Name) && matchKeyword(f.Name, keywords) != ""
+				if (req.EnableEmptyDir || req.EnableFlatten || kwHitFolder) && !activeCIDs[f.FID] {
 					if apiCalls >= maxCloudDirCalls {
 						if !budgetWarned {
 							budgetWarned = true
@@ -783,6 +801,21 @@ func (s *Service) scanCloudCenterTarget(
 							SourceCID:  cur.cid,
 							FID:        f.FID,
 						})
+					} else if kwHitFolder && sub.NextOffset == nil {
+						if hit, reason := evalCloudJunkFolder(f.Name, sub.Files, keywords, safeExts, kwMaxBytes, wbCfg.JunkKeywordMaxMB); hit {
+							out = append(out, OrganizeItem{
+								ID:         makeID(),
+								Tool:       "junk",
+								Scope:      "cloud",
+								TargetName: t.Name,
+								Name:       f.Name,
+								Detail:     reason,
+								Action:     "delete",
+								DestLabel:  "移入 115 回收站",
+								SourceCID:  cur.cid,
+								FID:        f.FID,
+							})
+						}
 					} else if req.EnableFlatten && len(sub.Files) == 1 && sub.NextOffset == nil && !strictDateDirRe.MatchString(f.Name) {
 						child := sub.Files[0]
 						out = append(out, OrganizeItem{
@@ -1027,7 +1060,8 @@ func (s *Service) scanLocalCenterTarget(
 					})
 					continue
 				}
-				if req.EnableEmptyDir || req.EnableFlatten {
+				kwHitLocalDir := req.EnableJunk && len(keywords) > 0 && !strictDateDirRe.MatchString(e.Name()) && matchKeyword(e.Name(), keywords) != ""
+				if req.EnableEmptyDir || req.EnableFlatten || kwHitLocalDir {
 					if children, rErr := os.ReadDir(full); rErr == nil {
 						if req.EnableEmptyDir && len(children) == 0 {
 							out = append(out, OrganizeItem{
@@ -1042,6 +1076,22 @@ func (s *Service) scanLocalCenterTarget(
 								SourcePath: full,
 							})
 							continue
+						}
+						if kwHitLocalDir && len(children) > 0 {
+							if hit, reason := evalLocalJunkFolder(e.Name(), children, keywords, safeExts, kwMaxBytes, wbCfg.JunkKeywordMaxMB); hit {
+								out = append(out, OrganizeItem{
+									ID:         makeID(),
+									Tool:       "junk",
+									Scope:      "local",
+									TargetName: t.Name,
+									Name:       e.Name(),
+									Detail:     reason,
+									Action:     "delete",
+									DestLabel:  "删除广告文件夹",
+									SourcePath: full,
+								})
+								continue
+							}
 						}
 						if req.EnableFlatten && len(children) == 1 && !strictDateDirRe.MatchString(e.Name()) {
 							ch := children[0]
@@ -1146,6 +1196,9 @@ func (s *Service) scanLocalCenterTarget(
 			}
 			if hit, reason := evalJunkFile(fc.name, sha, fc.size, junkExts, safeExts, sha1BL, keywords, kwMaxBytes, junkMaxBytes, wbCfg.JunkMaxMB, wbCfg.JunkKeywordMaxMB); hit {
 				isJunk = true
+				if sha == "" && fc.size > 0 && fc.size <= 50*1024*1024 {
+					sha, _ = hashFileSHA1(fc.path)
+				}
 				out = append(out, OrganizeItem{
 					ID:         makeID(),
 					Tool:       "junk",
@@ -1256,8 +1309,14 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	res := &CenterExecResult{}
 	completedIDs := make(map[string]bool)
 	var undoBatch []RenameUndoEntry
+	var deletedJunkSHA1s []string
 
 	defer func() {
+		if len(deletedJunkSHA1s) > 0 {
+			if added, err := s.AddJunkSHA1s(context.Background(), deletedJunkSHA1s); err == nil && added > 0 {
+				s.center.addLog(fmt.Sprintf("已自动将 %d 个已删垃圾文件的 SHA1 加入黑名单", added))
+			}
+		}
 		s.center.mu.Lock()
 		if len(undoBatch) > 0 {
 			s.center.lastRenames = undoBatch
@@ -1333,13 +1392,26 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		}
 		switch it.Action {
 		case "delete":
-			if err := os.Remove(srcPath); err != nil {
+			var delErr error
+			if it.Tool == "junk" {
+				if fi, statErr := os.Stat(srcPath); statErr == nil && fi.IsDir() {
+					delErr = os.RemoveAll(srcPath)
+				} else {
+					delErr = os.Remove(srcPath)
+				}
+			} else {
+				delErr = os.Remove(srcPath)
+			}
+			if delErr != nil {
 				res.FailedCount++
-				res.Errors = append(res.Errors, it.Name+": "+err.Error())
-				s.center.addLog("本地清理失败：" + it.Name + "（" + err.Error() + "）")
+				res.Errors = append(res.Errors, it.Name+": "+delErr.Error())
+				s.center.addLog("本地清理失败：" + it.Name + "（" + delErr.Error() + "）")
 			} else {
 				res.DeletedCount++
 				completedIDs[it.ID] = true
+				if it.Tool == "junk" && it.SHA1 != "" && it.Size > 0 {
+					deletedJunkSHA1s = append(deletedJunkSHA1s, it.SHA1)
+				}
 				s.center.addLog("已清理本地：" + it.Name)
 			}
 		case "rename":
@@ -1509,6 +1581,9 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			res.DeletedCount += len(grp)
 			for _, it := range grp {
 				completedIDs[it.ID] = true
+				if it.Tool == "junk" && it.SHA1 != "" && it.Size > 0 {
+					deletedJunkSHA1s = append(deletedJunkSHA1s, it.SHA1)
+				}
 			}
 			s.center.addLog(fmt.Sprintf("115 批量清理成功：%d 项已移入回收站（1 次批处理请求）", len(fids)))
 		}
@@ -1714,4 +1789,56 @@ func isCloudScanFatalErr(err error) bool {
 		}
 	}
 	return false
+}
+
+// evalCloudJunkFolder applies Option A: folder name hits keyword AND contains no subfolders,
+// no safe-extension files, and no file >= kwMaxBytes (default 20 MB).
+func evalCloudJunkFolder(folderName string, children []p115.CloudFile, keywords []string, safeExts map[string]bool, kwMaxBytes int64, kwMaxMB float64) (bool, string) {
+	if strictDateDirRe.MatchString(folderName) {
+		return false, ""
+	}
+	kw := matchKeyword(folderName, keywords)
+	if kw == "" {
+		return false, ""
+	}
+	for _, ch := range children {
+		if ch.IsDir {
+			return false, ""
+		}
+		ext := strings.ToLower(filepath.Ext(ch.Name))
+		if ext != "" && safeExts[ext] {
+			return false, ""
+		}
+		if kwMaxBytes > 0 && ch.Size >= kwMaxBytes {
+			return false, ""
+		}
+	}
+	return true, fmt.Sprintf("广告文件夹（命中「%s」且无≥%.0fMB大文件）", kw, kwMaxMB)
+}
+
+func evalLocalJunkFolder(folderName string, children []os.DirEntry, keywords []string, safeExts map[string]bool, kwMaxBytes int64, kwMaxMB float64) (bool, string) {
+	if strictDateDirRe.MatchString(folderName) {
+		return false, ""
+	}
+	kw := matchKeyword(folderName, keywords)
+	if kw == "" {
+		return false, ""
+	}
+	for _, ch := range children {
+		if ch.IsDir() {
+			return false, ""
+		}
+		ext := strings.ToLower(filepath.Ext(ch.Name()))
+		if ext != "" && safeExts[ext] {
+			return false, ""
+		}
+		info, err := ch.Info()
+		if err != nil {
+			return false, ""
+		}
+		if kwMaxBytes > 0 && info.Size() >= kwMaxBytes {
+			return false, ""
+		}
+	}
+	return true, fmt.Sprintf("广告文件夹（命中「%s」且无≥%.0fMB大文件）", kw, kwMaxMB)
 }

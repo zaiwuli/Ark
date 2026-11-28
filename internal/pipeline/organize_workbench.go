@@ -90,14 +90,46 @@ func (s *Service) SaveWorkbenchConfig(ctx context.Context, incoming WorkbenchCon
 	return norm, nil
 }
 
+const emptyFileSHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+
 func (s *Service) AddJunkSHA1(ctx context.Context, sha1Hex string) (WorkbenchConfig, error) {
 	h := strings.ToLower(strings.TrimSpace(sha1Hex))
-	if len(h) < 8 {
+	if len(h) < 8 || h == emptyFileSHA1 {
 		return WorkbenchConfig{}, store.ErrInvalid
 	}
 	cfg := s.WorkbenchConfig(ctx)
 	cfg.JunkSHA1Blacklist = append(cfg.JunkSHA1Blacklist, h)
 	return s.SaveWorkbenchConfig(ctx, cfg)
+}
+
+// AddJunkSHA1s batch-persists multiple SHA1 hashes into the junk blacklist,
+// skipping empty-file hashes and duplicates. Returns the count of newly added hashes.
+func (s *Service) AddJunkSHA1s(ctx context.Context, hashes []string) (int, error) {
+	if len(hashes) == 0 {
+		return 0, nil
+	}
+	cfg := s.WorkbenchConfig(ctx)
+	existing := make(map[string]bool, len(cfg.JunkSHA1Blacklist))
+	for _, h := range cfg.JunkSHA1Blacklist {
+		existing[strings.ToLower(strings.TrimSpace(h))] = true
+	}
+	added := 0
+	for _, raw := range hashes {
+		h := strings.ToLower(strings.TrimSpace(raw))
+		if len(h) < 8 || h == emptyFileSHA1 || existing[h] {
+			continue
+		}
+		existing[h] = true
+		cfg.JunkSHA1Blacklist = append(cfg.JunkSHA1Blacklist, h)
+		added++
+	}
+	if added == 0 {
+		return 0, nil
+	}
+	if _, err := s.SaveWorkbenchConfig(ctx, cfg); err != nil {
+		return 0, err
+	}
+	return added, nil
 }
 
 type RenameUndoEntry struct {
