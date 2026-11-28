@@ -1406,7 +1406,13 @@ async function blacklistItemSHA1(sha1, name, btn) {
     if (r.ok) {
       ocWorkbenchCfg = await r.json();
       applyWorkbenchToUI(ocWorkbenchCfg);
-      showToast('已加入广告 SHA1 黑名单，后续扫描自动拦截');
+      const target_keys = Array.from(document.querySelectorAll('.oc-target-cb:checked')).map((el) => el.value);
+      if (hasMatchingSnapshot(target_keys) && ocState.lastStatus !== 'running') {
+        await recomputeCenterPreview(null, true);
+        showToast('已拉黑 SHA1 并自动刷新预览（全部副本已归入垃圾清理）');
+      } else {
+        showToast('已加入广告 SHA1 黑名单，后续扫描自动拦截');
+      }
     }
   } finally { if (btn) btn.disabled = false; }
 }

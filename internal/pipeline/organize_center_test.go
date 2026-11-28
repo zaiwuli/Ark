@@ -462,13 +462,29 @@ func TestSnapshotZeroAPIRecomputePostExecSyncAndSHA1Manager(t *testing.T) {
 		t.Fatalf("expected newly emptied folder detected from synced snapshot, got %+v", plan3.Counts)
 	}
 
-	// 4. Verify SHA1 blacklist recorded filename + RemoveJunkSHA1 + ClearJunkSHA1 work
+	// 4. Verify blacklisted SHA1 on duplicated files sends ALL copies to junk (NOT 1 junk + N-1 duplicate!)
+	if _, err := svc.AddJunkSHA1(t.Context(), "dupsha111", "movie.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	plan4, _, err := svc.RecomputeCenterPreview(CenterScanRequest{
+		TargetKeys:      []string{"custom:" + ct.ID},
+		EnableJunk:      true,
+		EnableDuplicate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan4.Counts["junk"] != 2 || plan4.Counts["duplicate"] != 0 {
+		t.Fatalf("expected all 2 blacklisted copies in junk (0 in duplicate), got %+v", plan4.Counts)
+	}
+
+	// 5. Verify SHA1 blacklist recorded filename + RemoveJunkSHA1 work
 	wb := svc.WorkbenchConfig(t.Context())
 	if wb.JunkSHA1Names["junksha999"] != "广告.txt" {
 		t.Fatalf("expected SHA1 name recorded as 广告.txt, got %+v", wb.JunkSHA1Names)
 	}
 	wb2, err := svc.RemoveJunkSHA1(t.Context(), "junksha999")
-	if err != nil || len(wb2.JunkSHA1Blacklist) != 0 {
+	if err != nil || len(wb2.JunkSHA1Blacklist) != 1 {
 		t.Fatalf("RemoveJunkSHA1 failed: %+v err=%v", wb2.JunkSHA1Blacklist, err)
 	}
 }

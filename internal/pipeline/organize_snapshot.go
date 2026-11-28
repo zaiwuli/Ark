@@ -728,12 +728,55 @@ func (s *Service) evaluateSnapshot(
 			}
 		}
 
-		// 3. SHA1 Duplicate detection
+		// 3. Junk detection FIRST — so blacklisted SHA1 or repeated junk files ALL land in "junk" (not split across duplicate+junk!)
+		junkIdx := make(map[int]bool)
+		if req.EnableJunk {
+			for _, fi := range eligibleIdx {
+				f := &ts.Files[fi]
+				if !isCloud && f.SHA1 == "" && len(sha1BL) > 0 && f.Size > 0 && f.Size <= 50*1024*1024 {
+					if h, err := hashFileSHA1(f.Path); err == nil {
+						f.SHA1 = h
+					}
+				}
+				if hit, reason := evalJunkFile(f.Name, f.SHA1, f.Size, junkExts, safeExts, sha1BL, keywords, kwMaxBytes, junkMaxBytes, wbCfg.JunkMaxMB, wbCfg.JunkKeywordMaxMB); hit {
+					if !isCloud && f.SHA1 == "" && f.Size > 0 && f.Size <= 50*1024*1024 {
+						if h, err := hashFileSHA1(f.Path); err == nil {
+							f.SHA1 = h
+						}
+					}
+					junkIdx[fi] = true
+					destLbl := "删除文件"
+					if isCloud {
+						destLbl = "移入 115 回收站"
+					}
+					emit(OrganizeItem{
+						ID:         makeID(),
+						Tool:       "junk",
+						Scope:      t.Kind,
+						TargetName: t.Name,
+						Name:       f.Name,
+						SHA1:       f.SHA1,
+						Size:       f.Size,
+						Detail:     reason,
+						Action:     "delete",
+						DestLabel:  destLbl,
+						SourceCID:  f.ParentCID,
+						FID:        f.FID,
+						SourcePath: f.Path,
+					})
+				}
+			}
+		}
+
+		// 4. SHA1 Duplicate detection on non-junk files
 		dupIdx := make(map[int]bool)
 		if req.EnableDuplicate && len(eligibleIdx) > 1 {
 			groups := make(map[string][]int)
 			var order []string
 			for _, fi := range eligibleIdx {
+				if junkIdx[fi] {
+					continue
+				}
 				f := &ts.Files[fi]
 				if !isCloud {
 					if localSizeCounts[f.Size] < 2 {
@@ -795,46 +838,12 @@ func (s *Service) evaluateSnapshot(
 			}
 		}
 
-		// 4. Junk, Rename, Classify on non-duplicate files
+		// 5. Rename & Classify on non-junk, non-duplicate files
 		for _, fi := range eligibleIdx {
-			if dupIdx[fi] {
+			if junkIdx[fi] || dupIdx[fi] {
 				continue
 			}
 			f := &ts.Files[fi]
-			if req.EnableJunk {
-				if !isCloud && f.SHA1 == "" && len(sha1BL) > 0 && f.Size > 0 && f.Size <= 50*1024*1024 {
-					if h, err := hashFileSHA1(f.Path); err == nil {
-						f.SHA1 = h
-					}
-				}
-				if hit, reason := evalJunkFile(f.Name, f.SHA1, f.Size, junkExts, safeExts, sha1BL, keywords, kwMaxBytes, junkMaxBytes, wbCfg.JunkMaxMB, wbCfg.JunkKeywordMaxMB); hit {
-					if !isCloud && f.SHA1 == "" && f.Size > 0 && f.Size <= 50*1024*1024 {
-						if h, err := hashFileSHA1(f.Path); err == nil {
-							f.SHA1 = h
-						}
-					}
-					destLbl := "删除文件"
-					if isCloud {
-						destLbl = "移入 115 回收站"
-					}
-					emit(OrganizeItem{
-						ID:         makeID(),
-						Tool:       "junk",
-						Scope:      t.Kind,
-						TargetName: t.Name,
-						Name:       f.Name,
-						SHA1:       f.SHA1,
-						Size:       f.Size,
-						Detail:     reason,
-						Action:     "delete",
-						DestLabel:  destLbl,
-						SourceCID:  f.ParentCID,
-						FID:        f.FID,
-						SourcePath: f.Path,
-					})
-					continue
-				}
-			}
 			if req.EnableRename {
 				if nn, reason := cleanFilename(f.Name, wbCfg); nn != f.Name {
 					emit(OrganizeItem{
