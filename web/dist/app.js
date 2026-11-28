@@ -1214,6 +1214,7 @@ async function loadOrganizeCenter() {
     const customWrap = document.getElementById('oc-custom-list');
     if (customWrap) {
       const items = customResp.items || [];
+      ocCustomTargets = items;
       customWrap.innerHTML = items.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>名称</th><th>类型</th><th>CID / 路径</th><th>深度</th><th style="text-align:right;">操作</th></tr></thead>
@@ -1222,8 +1223,11 @@ async function loadOrganizeCenter() {
               <td><strong>${esc(c.name)}</strong></td>
               <td><span class="badge ${c.kind === 'cloud' ? 'badge-ok' : 'badge-info'}">${c.kind === 'cloud' ? '115 云' : '本地'}</span></td>
               <td><code>${esc(c.target)}</code></td>
-              <td>${c.depth || 1} 层</td>
-              <td style="text-align:right;"><button type="button" class="btn btn-danger btn-sm" onclick="deleteOrganizeTarget('${esc(c.id)}')">删除</button></td>
+              <td><select style="width:auto;padding:2px 6px;" onchange="updateOrganizeTargetDepth('${esc(c.id)}', Number(this.value))">${[1,2,3,4,5].map((n) => `<option value="${n}" ${(c.depth || 1) === n ? 'selected' : ''}>${n} 层</option>`).join('')}</select></td>
+              <td style="text-align:right;white-space:nowrap;">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="editOrganizeTarget('${esc(c.id)}')">编辑</button>
+                <button type="button" class="btn btn-danger btn-sm" onclick="deleteOrganizeTarget('${esc(c.id)}')">删除</button>
+              </td>
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="field-help">尚未保存自定义整理目录。</div>';
@@ -1231,6 +1235,47 @@ async function loadOrganizeCenter() {
 
     if (st) renderCenterState(st);
   } catch {}
+}
+
+let ocCustomTargets = [];
+let editingOrganizeTargetId = '';
+
+function editOrganizeTarget(id) {
+  const c = ocCustomTargets.find((x) => x.id === id);
+  if (!c) return;
+  editingOrganizeTargetId = c.id;
+  document.getElementById('ot-name').value = c.name || '';
+  document.getElementById('ot-kind').value = c.kind || 'cloud';
+  document.getElementById('ot-target').value = c.target || '';
+  document.getElementById('ot-depth').value = String(c.depth || 1);
+  const sb = document.getElementById('ot-save-btn');
+  const cb = document.getElementById('ot-cancel-btn');
+  if (sb) sb.textContent = '更新目标';
+  if (cb) cb.style.display = 'inline-flex';
+}
+
+function cancelEditOrganizeTarget() {
+  editingOrganizeTargetId = '';
+  document.getElementById('ot-name').value = '';
+  document.getElementById('ot-target').value = '';
+  const sb = document.getElementById('ot-save-btn');
+  const cb = document.getElementById('ot-cancel-btn');
+  if (sb) sb.textContent = '保存目标';
+  if (cb) cb.style.display = 'none';
+}
+
+async function updateOrganizeTargetDepth(id, depth) {
+  const c = ocCustomTargets.find((x) => x.id === id);
+  if (!c) return;
+  const r = await fetch('/api/v1/organizer/targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.id, name: c.name, kind: c.kind, target: c.target, depth }),
+  });
+  if (r.ok) {
+    showToast(`已将「${c.name}」深度改为 ${depth} 层`);
+    loadOrganizeCenter();
+  }
 }
 
 async function addOrganizeTarget(btn) {
@@ -1241,15 +1286,17 @@ async function addOrganizeTarget(btn) {
   if (!name || !target) return showToast('请填写目录名称与 CID 或路径');
   btn.disabled = true;
   try {
+    const payload = { name, kind, target, depth };
+    if (editingOrganizeTargetId) payload.id = editingOrganizeTargetId;
     const r = await fetch('/api/v1/organizer/targets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, kind, target, depth }),
+      body: JSON.stringify(payload),
     });
     if (!r.ok) return showToast('保存自定义目标失败');
-    document.getElementById('ot-name').value = '';
-    document.getElementById('ot-target').value = '';
-    showToast('已保存整理目标：' + name);
+    const wasEdit = !!editingOrganizeTargetId;
+    cancelEditOrganizeTarget();
+    showToast((wasEdit ? '已更新整理目标：' : '已保存整理目标：') + name);
     loadOrganizeCenter();
   } finally { btn.disabled = false; }
 }
