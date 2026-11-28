@@ -586,13 +586,17 @@ func (s *Service) scanCloudCenterTarget(
 	makeID func() string,
 ) []OrganizeItem {
 	type dirNode struct {
-		cid   string
-		depth int
+		cid       string
+		parentCID string
+		name      string
+		depth     int
 	}
 	maxSubDepth := t.Depth - 1
 	queue := []dirNode{{cid: t.CID, depth: 0}}
 	visited := make(map[string]bool)
-	const maxDirs = 40
+	const maxCloudDirCalls = 60
+	apiCalls := 0
+	budgetWarned := false
 
 	junkExts := parseExtSet(wbCfg.JunkExts)
 	safeExts := parseExtSet(wbCfg.JunkSafeExts)
@@ -613,9 +617,23 @@ func (s *Service) scanCloudCenterTarget(
 	var out []OrganizeItem
 	catName := sanitizeArchiveCatName(t.Name)
 
-	for len(queue) > 0 && len(visited) < maxDirs {
+	reportProgress := func() {
+		if apiCalls > 0 && apiCalls%5 == 0 {
+			s.center.setProgress(apiCalls, maxCloudDirCalls, fmt.Sprintf("正在扫描 [115] %s（已扫 %d 个目录）…", t.Name, apiCalls))
+			s.center.addLog(fmt.Sprintf("扫描进度 [115] %s：已扫 %d 个目录，已收集 %d 个文件 / %d 项待处理", t.Name, apiCalls, len(allFiles), len(out)))
+		}
+	}
+
+	for len(queue) > 0 {
 		if ctx.Err() != nil {
 			return out
+		}
+		if apiCalls >= maxCloudDirCalls {
+			if !budgetWarned {
+				budgetWarned = true
+				s.center.addLog(fmt.Sprintf("[115] %s 已达单目标安全上限（%d 次目录请求），为防风控已提前收尾，执行本批后可再次扫描", t.Name, maxCloudDirCalls))
+			}
+			break
 		}
 		cur := queue[0]
 		queue = queue[1:]
@@ -623,11 +641,54 @@ func (s *Service) scanCloudCenterTarget(
 			continue
 		}
 		visited[cur.cid] = true
+		apiCalls++
 
 		files, err := listAllCloudFiles(ctx, cloud, cur.cid)
 		if err != nil {
 			s.center.addLog(fmt.Sprintf("读取 115 目录 %s 失败：%s", cur.cid, err.Error()))
+			if isCloudScanFatalErr(err) {
+				s.center.addLog("检测到 115 熔断/限流/认证异常，已停止继续扫描当前目标。")
+				break
+			}
 			continue
+		}
+		reportProgress()
+
+		// Reuse this single BFS directory listing for empty_dir / flatten on subfolders (zero extra API calls!).
+		if cur.depth > 0 && !activeCIDs[cur.cid] {
+			if req.EnableEmptyDir && len(files) == 0 {
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "empty_dir",
+					Scope:      "cloud",
+					TargetName: t.Name,
+					Name:       cur.name,
+					Detail:     "空文件夹",
+					Action:     "delete",
+					DestLabel:  "移入 115 回收站",
+					SourceCID:  cur.parentCID,
+					FID:        cur.cid,
+				})
+				continue
+			}
+			if req.EnableFlatten && len(files) == 1 && !strictDateDirRe.MatchString(cur.name) {
+				child := files[0]
+				out = append(out, OrganizeItem{
+					ID:         makeID(),
+					Tool:       "flatten",
+					Scope:      "cloud",
+					TargetName: t.Name,
+					Name:       cur.name + "/" + child.Name,
+					Detail:     "单子项套娃文件夹",
+					Action:     "flatten",
+					DestLabel:  "提至上层并清壳",
+					SourceCID:  cur.parentCID,
+					FID:        cur.cid,
+					ChildFID:   child.FID,
+					ChildName:  child.Name,
+				})
+				continue
+			}
 		}
 
 		for _, f := range files {
@@ -640,8 +701,11 @@ func (s *Service) scanCloudCenterTarget(
 					if activeDates[f.Name] || activeCIDs[f.FID] {
 						continue
 					}
-					if req.EnableEmptyDir {
-						if sub, subErr := cloud.Files(ctx, f.FID, 0); subErr == nil && len(sub.Files) == 0 {
+					if req.EnableEmptyDir && apiCalls < maxCloudDirCalls {
+						apiCalls++
+						sub, subErr := cloud.Files(ctx, f.FID, 0)
+						reportProgress()
+						if subErr == nil && len(sub.Files) == 0 {
 							out = append(out, OrganizeItem{
 								ID:         makeID(),
 								Tool:       "empty_dir",
@@ -674,47 +738,68 @@ func (s *Service) scanCloudCenterTarget(
 					})
 					continue
 				}
-				// Optional empty folder / single-child flatten probe
-				if (req.EnableEmptyDir || req.EnableFlatten) && !isManagedCloudSkipDir(f, p115Cfg) && !activeCIDs[f.FID] {
-					sub, subErr := cloud.Files(ctx, f.FID, 0)
-					if subErr == nil {
-						if req.EnableEmptyDir && len(sub.Files) == 0 {
-							out = append(out, OrganizeItem{
-								ID:         makeID(),
-								Tool:       "empty_dir",
-								Scope:      "cloud",
-								TargetName: t.Name,
-								Name:       f.Name,
-								Detail:     "空文件夹",
-								Action:     "delete",
-								DestLabel:  "移入 115 回收站",
-								SourceCID:  cur.cid,
-								FID:        f.FID,
-							})
-							continue
-						}
-						if req.EnableFlatten && len(sub.Files) == 1 && sub.NextOffset == nil && !strictDateDirRe.MatchString(f.Name) {
-							child := sub.Files[0]
-							out = append(out, OrganizeItem{
-								ID:         makeID(),
-								Tool:       "flatten",
-								Scope:      "cloud",
-								TargetName: t.Name,
-								Name:       f.Name + "/" + child.Name,
-								Detail:     "单子项套娃文件夹",
-								Action:     "flatten",
-								DestLabel:  "提至上层并清壳",
-								SourceCID:  cur.cid,
-								FID:        f.FID,
-								ChildFID:   child.FID,
-								ChildName:  child.Name,
-							})
-							continue
-						}
-					}
+				if isManagedCloudSkipDir(f, p115Cfg) {
+					continue
 				}
-				if cur.depth < maxSubDepth && !isManagedCloudSkipDir(f, p115Cfg) && !visited[f.FID] {
-					queue = append(queue, dirNode{cid: f.FID, depth: cur.depth + 1})
+				// If within scan depth, enqueue into BFS — empty_dir/flatten will be evaluated for FREE on pop!
+				if cur.depth < maxSubDepth && !visited[f.FID] {
+					queue = append(queue, dirNode{
+						cid:       f.FID,
+						parentCID: cur.cid,
+						name:      f.Name,
+						depth:     cur.depth + 1,
+					})
+					continue
+				}
+				// Leaf directory (at maxSubDepth): only probe if empty_dir/flatten is enabled and budget remains.
+				if (req.EnableEmptyDir || req.EnableFlatten) && !activeCIDs[f.FID] {
+					if apiCalls >= maxCloudDirCalls {
+						if !budgetWarned {
+							budgetWarned = true
+							s.center.addLog(fmt.Sprintf("[115] %s 已达单目标安全上限（%d 次目录请求），为防风控已停止继续探测子目录", t.Name, maxCloudDirCalls))
+						}
+						continue
+					}
+					apiCalls++
+					sub, subErr := cloud.Files(ctx, f.FID, 0)
+					reportProgress()
+					if subErr != nil {
+						if isCloudScanFatalErr(subErr) {
+							s.center.addLog("检测到 115 熔断/限流/认证异常，已停止继续扫描当前目标。")
+							break
+						}
+						continue
+					}
+					if req.EnableEmptyDir && len(sub.Files) == 0 {
+						out = append(out, OrganizeItem{
+							ID:         makeID(),
+							Tool:       "empty_dir",
+							Scope:      "cloud",
+							TargetName: t.Name,
+							Name:       f.Name,
+							Detail:     "空文件夹",
+							Action:     "delete",
+							DestLabel:  "移入 115 回收站",
+							SourceCID:  cur.cid,
+							FID:        f.FID,
+						})
+					} else if req.EnableFlatten && len(sub.Files) == 1 && sub.NextOffset == nil && !strictDateDirRe.MatchString(f.Name) {
+						child := sub.Files[0]
+						out = append(out, OrganizeItem{
+							ID:         makeID(),
+							Tool:       "flatten",
+							Scope:      "cloud",
+							TargetName: t.Name,
+							Name:       f.Name + "/" + child.Name,
+							Detail:     "单子项套娃文件夹",
+							Action:     "flatten",
+							DestLabel:  "提至上层并清壳",
+							SourceCID:  cur.cid,
+							FID:        f.FID,
+							ChildFID:   child.FID,
+							ChildName:  child.Name,
+						})
+					}
 				}
 				continue
 			}
@@ -1218,19 +1303,37 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 	cloud, p115Cfg := s.snapshotCloud()
 	doneCount := 0
 
-	// 1. Execute local items first (instant, no rate limit).
-	for _, it := range selected {
+	// 1. Execute local items first (instant, no rate limit) in safe multi-select phase order:
+	// delete -> rename -> flatten -> move, propagating renamed paths so rename+classify on the same file both succeed.
+	var localOrdered []OrganizeItem
+	for _, phase := range []string{"delete", "rename", "flatten", "move"} {
+		for _, it := range selected {
+			if it.Scope != "local" {
+				continue
+			}
+			act := it.Action
+			if act != "delete" && act != "rename" && act != "flatten" {
+				act = "move"
+			}
+			if act == phase {
+				localOrdered = append(localOrdered, it)
+			}
+		}
+	}
+	renamedPathMap := make(map[string]string)
+	for _, it := range localOrdered {
 		if ctx.Err() != nil {
 			return
 		}
-		if it.Scope != "local" {
-			continue
-		}
 		doneCount++
 		s.center.setProgress(doneCount, len(selected), fmt.Sprintf("处理本地：%s（%d/%d）", it.Name, doneCount, len(selected)))
+		srcPath := it.SourcePath
+		if mapped, ok := renamedPathMap[srcPath]; ok {
+			srcPath = mapped
+		}
 		switch it.Action {
 		case "delete":
-			if err := os.Remove(it.SourcePath); err != nil {
+			if err := os.Remove(srcPath); err != nil {
 				res.FailedCount++
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
 				s.center.addLog("本地清理失败：" + it.Name + "（" + err.Error() + "）")
@@ -1247,11 +1350,12 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				s.center.addLog("本地改名跳过（重名）：" + it.Name)
 				continue
 			}
-			if err := os.Rename(it.SourcePath, destPath); err != nil {
+			if err := os.Rename(srcPath, destPath); err != nil {
 				res.FailedCount++
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
 				s.center.addLog("本地改名失败：" + it.Name + "（" + err.Error() + "）")
 			} else {
+				renamedPathMap[it.SourcePath] = destPath
 				res.RenamedCount++
 				completedIDs[it.ID] = true
 				undoBatch = append(undoBatch, RenameUndoEntry{
@@ -1266,7 +1370,7 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
 				s.center.addLog("本地解包失败：" + it.Name + "（" + err.Error() + "）")
 			} else {
-				_ = os.Remove(it.SourcePath)
+				_ = os.Remove(srcPath)
 				res.MovedCount++
 				completedIDs[it.ID] = true
 				s.center.addLog("已解包本地：" + it.Name)
@@ -1285,15 +1389,15 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
 				continue
 			}
-			destPath := uniqueDestPath(filepath.Join(destParent, filepath.Base(it.SourcePath)))
-			if err := os.Rename(it.SourcePath, destPath); err != nil {
+			destPath := uniqueDestPath(filepath.Join(destParent, filepath.Base(srcPath)))
+			if err := os.Rename(srcPath, destPath); err != nil {
 				res.FailedCount++
 				res.Errors = append(res.Errors, it.Name+": "+err.Error())
 				s.center.addLog("本地移动失败：" + it.Name + "（" + err.Error() + "）")
 			} else {
 				res.MovedCount++
 				completedIDs[it.ID] = true
-				s.center.addLog("已移动本地：" + it.Name + " → " + it.DestLabel)
+				s.center.addLog("已移动本地：" + filepath.Base(srcPath) + " → " + it.DestLabel)
 			}
 		}
 	}
@@ -1358,7 +1462,8 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 		doneCount += len(grp)
 	}
 
-	// 2b. Flatten single-child cloud folders (move child up + recycle wrapper)
+	// 2b. Flatten single-child cloud folders (move child up, then batch-recycle all empty wrappers per parent)
+	flattenShellDeletes := make(map[string][]string)
 	for _, it := range cloudFlattens {
 		if ctx.Err() != nil {
 			return
@@ -1369,12 +1474,22 @@ func (s *Service) runCenterExecJob(ctx context.Context, jobID string, selected [
 			res.Errors = append(res.Errors, it.Name+": "+err.Error())
 			s.center.addLog("115 解包失败：" + it.Name + "（" + err.Error() + "）")
 		} else {
-			_ = cloud.BatchDelete(ctx, it.SourceCID, []string{it.FID})
+			flattenShellDeletes[it.SourceCID] = append(flattenShellDeletes[it.SourceCID], it.FID)
 			res.MovedCount++
 			completedIDs[it.ID] = true
 			s.center.addLog("115 解包成功：" + it.Name)
 		}
 		doneCount++
+	}
+	for srcCID, shellFIDs := range flattenShellDeletes {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := cloud.BatchDelete(ctx, srcCID, shellFIDs); err != nil {
+			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳失败：%s", len(shellFIDs), err.Error()))
+		} else {
+			s.center.addLog(fmt.Sprintf("115 批量清理 %d 个解包空壳完成（1 次批处理）", len(shellFIDs)))
+		}
 	}
 
 	for srcCID, grp := range cloudDelGroups {
@@ -1585,4 +1700,18 @@ func hashFileSHA1(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func isCloudScanFatalErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ae *p115.AdapterError
+	if errors.As(err, &ae) {
+		switch ae.Code {
+		case "CIRCUIT_OPEN", "AUTH_REQUIRED", "RATE_LIMITED", "BUDGET_EXCEEDED":
+			return true
+		}
+	}
+	return false
 }

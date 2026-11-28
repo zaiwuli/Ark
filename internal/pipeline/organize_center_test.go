@@ -236,3 +236,99 @@ func TestWorkbenchRenameUndoKeywordsSHA1BlacklistAndFlatten(t *testing.T) {
 		t.Fatalf("expected UndoRenameCount=0 after undo")
 	}
 }
+
+func TestMultiSelectLocalRenamePlusClassifyAndCloudBFSSinglePass(t *testing.T) {
+	tmp := t.TempDir()
+	st, err := store.Open(filepath.Join(tmp, "ark.db"), filepath.Join(tmp, "secret.key"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	svc := NewServiceWithOptions(st, ServiceOptions{Timezone: "Asia/Shanghai", DataDir: tmp, WorkDir: tmp})
+
+	// 1. Local multi-select: rename + classify on the SAME file must both succeed!
+	localDir := filepath.Join(tmp, "mix")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "www.98t.la@clip.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lt, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "本地混排", Kind: "local", Target: localDir, Depth: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanAds := true
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:     []string{"custom:" + lt.ID},
+		EnableRename:   true,
+		EnableClassify: true,
+		RenameCleanAds: &cleanAds,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var snap CenterJobState
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["rename"] != 1 || snap.Plan.Counts["classify"] != 1 {
+		t.Fatalf("unexpected local multi-select plan: %+v", snap.Plan)
+	}
+	ids := make([]string, 0, len(snap.Plan.Items))
+	for _, it := range snap.Plan.Items {
+		ids = append(ids, it.ID)
+	}
+	if _, err := svc.StartCenterExec(ids); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Result == nil || snap.Result.FailedCount != 0 || snap.Result.RenamedCount != 1 || snap.Result.MovedCount != 1 {
+		t.Fatalf("expected 0 failures, 1 rename, 1 move; got %+v", snap.Result)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "视频", "clip.mp4")); err != nil {
+		t.Fatalf("expected renamed+classified file at 视频/clip.mp4: %v", err)
+	}
+
+	// 2. Cloud depth=2 BFS: empty_dir + flatten evaluated in a single pass with zero duplicate probing
+	mock := p115.NewMockClient()
+	mock.Listings["bfs_root"] = []p115.CloudFile{
+		{FID: "d_empty", CID: "bfs_root", Name: "空目录", IsDir: true},
+		{FID: "d_wrap", CID: "bfs_root", Name: "套娃壳", IsDir: true},
+	}
+	mock.Listings["d_empty"] = []p115.CloudFile{}
+	mock.Listings["d_wrap"] = []p115.CloudFile{
+		{FID: "f_inner", CID: "d_wrap", Name: "movie.mp4", Size: 100 * 1024 * 1024},
+	}
+	svc.SetPort(mock, P115Settings{Enabled: true, Cookie: "UID=1", CloudRootCID: "root_cid"})
+	ct, err := svc.UpsertOrganizeTarget(t.Context(), OrganizeTarget{Name: "深扫测试", Kind: "cloud", Target: "bfs_root", Depth: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.StartCenterScan(CenterScanRequest{
+		TargetKeys:     []string{"custom:" + ct.ID},
+		EnableEmptyDir: true,
+		EnableFlatten:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		snap = svc.CenterJobState()
+		if snap.Status != "running" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if snap.Status != "done" || snap.Plan == nil || snap.Plan.Counts["empty_dir"] != 1 || snap.Plan.Counts["flatten"] != 1 {
+		t.Fatalf("unexpected cloud BFS plan: %+v", snap.Plan)
+	}
+}
